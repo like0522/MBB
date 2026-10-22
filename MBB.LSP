@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 21:15:00
+;; LAST MODIFIED: 2026-10-23 08:25:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.0 (2026-10-23 08:25:00) : MBBN 대형 단품(길이+면적 복합 Bigness) 우선순위 및 시행착오(Backtracking) 수율 극대화 네스팅 엔진 구축
+;;                                 (대형 장척물/대면적 판재 최우선 배치, 잔여 유휴 공간(Cavity) 소형 부품 밀착 충진, 20코어 64개 병렬 전략 & 리패킹)
 ;; - v2.9 (2026-10-23 07:17:00) : MBBN 실행 시 외곽 여유(Margin) 및 단품 간격(Gap) 대화식 동적 설정 기능 추가
 ;;                                 (Enter 직전값 유지, 세션 메모리 *MBBN_MARGIN* / *MBBN_GAP*, initget 음수 방어)
 ;; - v2.8 (2026-10-23 07:03:00) : MBBN 다중 외곽 컨테이너(Multi-Container) 지원 & 자재 수율(Yield) 극대화 멀티코어 2D 네스팅 구축
@@ -2199,7 +2201,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v2.9] 다중 컨테이너(Multi-Container) 자재 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v3.0] 대형 단품(길이+면적) 우선 & 시행착오(Backtracking) 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2443,16 +2445,21 @@
 
               (if parts-list
                 (progn
-                  ;; FFD (First-Fit Decreasing) 면적 정렬
-                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 5 a) (nth 5 b)))))
+;;; [START: CURRENT ACTIVE - v3.0 MODIFIED (2026-10-23 08:25:00)]
+                  ;; 대형 단품(길이 + 면적 복합 Bigness) 최우선 정렬
+                  (setq parts-list (vl-sort parts-list 
+                                     '(lambda (a b) 
+                                        (> (+ (nth 5 a) (* (max (nth 3 a) (nth 4 a)) 500.0))
+                                           (+ (nth 5 b) (* (max (nth 3 b) (nth 4 b)) 500.0))))))
                   
                   (setq i 1)
                   (foreach p parts-list
                     (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos (nth 3 p) 2 1) 
                                    " mm, 높이 = " (rtos (nth 4 p) 2 1) 
-                                   " mm (홀 " (itoa (nth 6 p)) "개, 글자 " (itoa (nth 7 p)) "개 묶음)"))
+                                   " mm (Bigness 크기순 우선 정렬, 홀 " (itoa (nth 6 p)) "개, 글자 " (itoa (nth 7 p)) "개 묶음)"))
                     (setq i (1+ i))
                   )
+;;; [END: CURRENT ACTIVE - v3.0 MODIFIED]
 
                   ;; (margin & gap 설정값 유지)
 
@@ -2569,7 +2576,7 @@
                     )
                   )
 
-                  (princ (strcat "\n>> [Python 멀티코어 수율 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 병렬 조합 탐색"))
+                  (princ (strcat "\n>> [Python 멀티코어 수율 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 병렬 시행착오(Backtracking) 탐색"))
                   (setq wsh (vlax-create-object "WScript.Shell"))
                   (if wsh
                     (progn
