@@ -2,9 +2,9 @@
 """
 =============================================================================
 [MBBN Ultra-Fast 2D Nesting Multi-Core Engine]
-Program: MBB Nesting Optimizer (Python 3.14 Multi-Core / Shapely Engine)
-Version: v2.7 (2026-10-22 22:25:00)
-Architecture: Wall-Adaptive + Multi-Policy Rotation & Alignment Engine
+Program: MBB Multi-Container Yield Optimizer (Python 3.14 / Shapely / GEOS)
+Version: v2.8 (2026-10-23 07:03:00)
+Architecture: Multi-Container Multi-Bin Yield Maximization + Wall-Adaptive
 =============================================================================
 """
 
@@ -68,25 +68,22 @@ def rects_overlap(r1, r2, gap=0.0):
                 y1 + h1 + gap <= y2 or
                 y2 + h2 + gap <= y1)
 
-def solve_nesting_strategy(args):
+def pack_parts_into_single_container(parts, container, gap, margin, rot_policy, align_pref):
     """
-    Evaluates a specific sorting, rotation policy, and alignment strategy.
-    Supports Polygon containers and dedicated Circle/Pipe containers.
+    Packs as many parts as possible into one container (Circle or Polygon).
+    Returns (placed_plan, unplaced_parts).
     """
-    strategy_id, parts_data, outer_data, gap, margin = args
-
-    is_circle = (outer_data.get('container_type') == 'circle')
+    is_circle = (container.get('type') == 'circle')
     if is_circle:
-        cx, cy = outer_data['circle_center']
-        R = float(outer_data['circle_radius'])
+        cx, cy = container['circle_center']
+        R = float(container['circle_radius'])
         min_ox, min_oy = cx - R, cy - R
         max_ox, max_oy = cx + R, cy + R
         prep_poly = None
 
         def x_range_fn(y):
             dy = abs(y - cy)
-            if dy > R:
-                return None
+            if dy > R: return None
             dx = math.sqrt(max(0.0, R * R - dy * dy))
             return (cx - dx, cx + dx)
 
@@ -97,8 +94,8 @@ def solve_nesting_strategy(args):
                     return False
             return True
     else:
-        outer_pts = outer_data['outer_polygon']
-        min_ox, min_oy, max_ox, max_oy = outer_data['outer_bbox']
+        outer_pts = container['outer_polygon']
+        min_ox, min_oy, max_ox, max_oy = container['outer_bbox']
         prep_poly = None
         if HAS_SHAPELY:
             poly_obj = Polygon(outer_pts)
@@ -126,91 +123,20 @@ def solve_nesting_strategy(args):
             return True
 
     def get_left_fit_x(gy, h):
-        """Find max left and min right envelope over height range [gy-margin, gy+h+margin]"""
         max_left = -float('inf')
         min_right = float('inf')
         steps = 8
         for i in range(steps + 1):
             y = (gy - margin) + (i / float(steps)) * (h + 2 * margin)
             rng = x_range_fn(y)
-            if rng is None:
-                return None, None
-            if rng[0] > max_left:
-                max_left = rng[0]
-            if rng[1] < min_right:
-                min_right = rng[1]
+            if rng is None: return None, None
+            if rng[0] > max_left: max_left = rng[0]
+            if rng[1] < min_right: min_right = rng[1]
         return max_left + margin, min_right - margin
 
-    # Sorting & Rotation Policy configuration
-    parts = list(parts_data)
-    rot_policy = 'mixed'
-    align_pref = 'left'
-
-    if strategy_id == 0:
-        # Area descending, prefer horizontal (90 deg) for long parts
-        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-    elif strategy_id == 1:
-        # Area descending, prefer vertical (0 deg) for long parts
-        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_policy = 0
-        align_pref = 'left'
-    elif strategy_id == 2:
-        # Area descending, center align, 90 deg policy
-        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_policy = 90
-        align_pref = 'center'
-    elif strategy_id == 3:
-        # Area ascending (small parts first!), 90 deg policy
-        parts.sort(key=lambda p: p['w'] * p['h'])
-        rot_policy = 90
-        align_pref = 'left'
-    elif strategy_id == 4:
-        # Area ascending (small parts first!), 0 deg policy
-        parts.sort(key=lambda p: p['w'] * p['h'])
-        rot_policy = 0
-        align_pref = 'left'
-    elif strategy_id == 5:
-        # Max dimension descending, 90 deg policy
-        parts.sort(key=lambda p: max(p['w'], p['h']), reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-    elif strategy_id == 6:
-        # Max dimension descending, 0 deg policy
-        parts.sort(key=lambda p: max(p['w'], p['h']), reverse=True)
-        rot_policy = 0
-        align_pref = 'left'
-    elif strategy_id == 7:
-        # Perimeter descending, mixed policy
-        parts.sort(key=lambda p: 2 * (p['w'] + p['h']), reverse=True)
-        rot_policy = 'mixed'
-        align_pref = 'center'
-    elif strategy_id == 8:
-        # Height descending, 90 deg policy
-        parts.sort(key=lambda p: p['h'], reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-    elif strategy_id == 9:
-        # Width descending, 0 deg policy
-        parts.sort(key=lambda p: p['w'], reverse=True)
-        rot_policy = 0
-        align_pref = 'left'
-    else:
-        # Randomized permutation multi-start
-        import random
-        rng_rand = random.Random(strategy_id * 101 + 19)
-        rng_rand.shuffle(parts)
-        if strategy_id % 3 == 0:
-            rot_policy = 90
-        elif strategy_id % 3 == 1:
-            rot_policy = 0
-        else:
-            rot_policy = 'mixed'
-        align_pref = 'center' if (strategy_id % 2 == 0) else 'left'
-
     placed = []
-    plan = []
+    placed_plan = []
+    unplaced = []
 
     for p in parts:
         pid = p['id']
@@ -218,61 +144,51 @@ def solve_nesting_strategy(args):
         ph = float(p['h'])
         aspect = max(pw, ph) / max(1.0, min(pw, ph))
 
-        best_anchor = None
-        best_rot = 0
-        best_w, best_h = pw, ph
-        best_score = float('inf')
-
-        # Determine valid rotations for this part based on rot_policy
         if rot_policy == 90:
-            # If part is elongated (aspect > 1.2), test 90 only. If square, test [90, 0]
             valid_rots = [90] if aspect > 1.2 else [90, 0]
         elif rot_policy == 0:
             valid_rots = [0] if aspect > 1.2 else [0, 90]
         else:
-            valid_rots = [0, 90] if (strategy_id % 2 == 0) else [90, 0]
+            valid_rots = [0, 90]
 
-        # Filter rotations that exceed container dimensions
         filtered_rots = []
         for rot in valid_rots:
             cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
             if cur_w <= (max_ox - min_ox) and cur_h <= (max_oy - min_oy):
                 filtered_rots.append(rot)
+
         if not filtered_rots:
-            # Fallback to any rotation that fits
             for rot in [0, 90]:
                 cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
                 if cur_w <= (max_ox - min_ox) and cur_h <= (max_oy - min_oy):
                     filtered_rots.append(rot)
 
+        best_anchor = None
+        best_rot = 0
+        best_w, best_h = pw, ph
+        best_score = float('inf')
+
         for rot in filtered_rots:
             cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
-
-            # Generate candidate heights gy
-            candidate_gys = []
-            step_y = max(4.0, (max_oy - min_oy) / 100.0)
+            cand_gys = []
+            step_y = max(4.0, (max_oy - min_oy) / 80.0)
             cy_val = min_oy + margin
             while cy_val + cur_h + margin <= max_oy:
-                candidate_gys.append(cy_val)
+                cand_gys.append(cy_val)
                 cy_val += step_y
 
             for pr in placed:
-                top_y = pr[1] + pr[3] + gap
-                bot_y = pr[1] - cur_h - gap
-                if top_y + cur_h + margin <= max_oy:
-                    candidate_gys.append(top_y)
-                if bot_y >= min_oy + margin:
-                    candidate_gys.append(bot_y)
-                candidate_gys.append(pr[1])
+                cand_gys.append(pr[1] + pr[3] + gap)
+                cand_gys.append(pr[1] - cur_h - gap)
+                cand_gys.append(pr[1])
 
-            candidate_gys = sorted(list(set(candidate_gys)))
+            cand_gys = sorted(list(set([y for y in cand_gys if min_oy + margin <= y <= max_oy - cur_h - margin])))
 
-            for gy in candidate_gys:
+            for gy in cand_gys:
                 xl, xr = get_left_fit_x(gy, cur_h)
                 if xl is None or (xl + cur_w > xr):
                     continue
 
-                # Candidate X coordinates:
                 cand_xs = []
                 if align_pref == 'center':
                     cand_xs.append((xl + xr - cur_w) * 0.5)
@@ -283,35 +199,22 @@ def solve_nesting_strategy(args):
                     cand_xs.append((xl + xr - cur_w) * 0.5)
                     cand_xs.append(xr - cur_w)
 
-                # Relative to already placed parts
                 for pr in placed:
-                    cand_xs.append(pr[0] + pr[2] + gap)   # Step right
-                    cand_xs.append(pr[0] - cur_w - gap)   # Step left
-                    cand_xs.append(pr[0])                  # Flush left
-                    cand_xs.append(pr[0] + pr[2] - cur_w)  # Flush right
+                    cand_xs.append(pr[0] + pr[2] + gap)
+                    cand_xs.append(pr[0] - cur_w - gap)
+                    cand_xs.append(pr[0])
+                    cand_xs.append(pr[0] + pr[2] - cur_w)
 
-                # Filter and deduplicate cand_xs
                 cand_xs = [x for x in set(cand_xs) if xl <= x <= xr - cur_w]
 
                 for gx in cand_xs:
                     cur_r = (gx, gy, cur_w, cur_h)
-                    collides = False
-                    for pr in placed:
-                        if rects_overlap(cur_r, pr, gap):
-                            collides = True
-                            break
-                    if collides:
+                    if any(rects_overlap(cur_r, pr, gap) for pr in placed):
                         continue
-
                     if not is_inside_fn(gx, gy, cur_w, cur_h):
                         continue
 
-                    # Score calculation
-                    if strategy_id % 2 == 0:
-                        score = (gy - min_oy) * 10000.0 + (gx - min_ox)
-                    else:
-                        score = (gy - min_oy) * 10000.0 + abs(gx - (min_ox + max_ox) * 0.5)
-
+                    score = (gy - min_oy) * 10000.0 + (gx - min_ox)
                     if score < best_score:
                         best_score = score
                         best_anchor = (gx, gy)
@@ -321,33 +224,124 @@ def solve_nesting_strategy(args):
         if best_anchor is not None:
             gx, gy = best_anchor
             placed.append((gx, gy, best_w, best_h))
-            plan.append({
+            placed_plan.append({
                 'id': pid,
+                'container_id': container['id'],
                 'gx': gx,
                 'gy': gy,
                 'w': best_w,
                 'h': best_h,
-                'rot': best_rot
+                'rot': best_rot,
+                'area': float(p.get('area', best_w * best_h))
             })
+        else:
+            unplaced.append(p)
 
-    total_parts = len(parts_data)
-    placed_count = len(plan)
-    if placed_count == total_parts:
-        p_min_x = min(r[0] for r in placed)
-        p_max_x = max(r[0] + r[2] for r in placed)
-        p_min_y = min(r[1] for r in placed)
-        p_max_y = max(r[1] + r[3] for r in placed)
-        footprint_area = (p_max_x - p_min_x) * (p_max_y - p_min_y)
-        fitness = 1000000.0 - footprint_area
+    return placed_plan, unplaced
+
+def solve_multi_strategy(args):
+    """
+    Evaluates multi-container packing strategy.
+    Tries different parts orders, container orders, and rotation policies.
+    """
+    strategy_id, parts_data, containers_data, gap, margin = args
+
+    # Clone containers
+    c_list = list(containers_data)
+    parts = list(parts_data)
+
+    # 1. Container ordering policy
+    if strategy_id % 4 == 0:
+        # Original order
+        pass
+    elif strategy_id % 4 == 1:
+        # Largest container area first
+        c_list.sort(key=lambda c: float(c.get('area', 0.0)), reverse=True)
+    elif strategy_id % 4 == 2:
+        # Smallest container area first
+        c_list.sort(key=lambda c: float(c.get('area', 0.0)))
     else:
-        fitness = placed_count * 1000.0
+        # Circular containers first
+        c_list.sort(key=lambda c: (0 if c.get('type') == 'circle' else 1))
+
+    # 2. Parts sorting policy
+    strat_type = strategy_id // 4
+    if strat_type == 0:
+        parts.sort(key=lambda p: float(p.get('area', p['w'] * p['h'])), reverse=True)
+        rot_policy = 90
+        align_pref = 'left'
+    elif strat_type == 1:
+        parts.sort(key=lambda p: float(p.get('area', p['w'] * p['h'])), reverse=True)
+        rot_policy = 0
+        align_pref = 'left'
+    elif strat_type == 2:
+        parts.sort(key=lambda p: float(p.get('area', p['w'] * p['h'])), reverse=True)
+        rot_policy = 'mixed'
+        align_pref = 'center'
+    elif strat_type == 3:
+        # Long parts first (aspect ratio)
+        parts.sort(key=lambda p: max(p['w'], p['h']) / max(1.0, min(p['w'], p['h'])), reverse=True)
+        rot_policy = 90
+        align_pref = 'left'
+    elif strat_type == 4:
+        # Max dimension descending
+        parts.sort(key=lambda p: max(p['w'], p['h']), reverse=True)
+        rot_policy = 90
+        align_pref = 'left'
+    elif strat_type == 5:
+        # Area ascending (small parts first)
+        parts.sort(key=lambda p: float(p.get('area', p['w'] * p['h'])))
+        rot_policy = 90
+        align_pref = 'left'
+    elif strat_type == 6:
+        # Perimeter descending
+        parts.sort(key=lambda p: 2 * (p['w'] + p['h']), reverse=True)
+        rot_policy = 'mixed'
+        align_pref = 'center'
+    else:
+        # Randomized shuffle
+        import random
+        rng = random.Random(strategy_id * 107 + 23)
+        rng.shuffle(parts)
+        rng.shuffle(c_list)
+        rot_policy = 90 if (strategy_id % 2 == 0) else 0
+        align_pref = 'left' if (strategy_id % 3 == 0) else 'center'
+
+    # Multi-container sequential bin packing
+    total_plan = []
+    remaining_parts = list(parts)
+    used_containers = set()
+
+    for container in c_list:
+        if not remaining_parts:
+            break
+        c_plan, unplaced = pack_parts_into_single_container(remaining_parts, container, gap, margin, rot_policy, align_pref)
+        if c_plan:
+            total_plan.extend(c_plan)
+            used_containers.add(container['id'])
+            remaining_parts = unplaced
+
+    # Metrics calculation
+    placed_count = len(total_plan)
+    total_parts = len(parts_data)
+    placed_area = sum(p['area'] for p in total_plan)
+    used_c_area = sum(float(c.get('area', 1.0)) for c in containers_data if c['id'] in used_containers)
+    if used_c_area <= 0.0:
+        used_c_area = 1.0
+    yield_pct = (placed_area / used_c_area) * 100.0
+
+    # Fitness: High placed count > High placed area > High yield %
+    fitness = (placed_count * 10000000.0) + (placed_area * 10.0) + (yield_pct * 100.0) - (used_c_area * 0.1)
 
     return {
         'strategy_id': strategy_id,
         'placed_count': placed_count,
         'total_parts': total_parts,
+        'placed_area': placed_area,
+        'yield_pct': yield_pct,
+        'used_containers': list(used_containers),
         'fitness': fitness,
-        'plan': plan
+        'plan': total_plan
     }
 
 def run_nesting(input_path, output_lsp_path, output_json_path=None):
@@ -356,36 +350,41 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         with open(input_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        container_type = data.get('container_type', 'polygon')
         gap = float(data.get('gap', 3.0))
         margin = float(data.get('margin', 2.0))
         parts_data = data['parts']
         total_parts = len(parts_data)
 
-        outer_data = {
-            'container_type': container_type,
-            'outer_bbox': data.get('outer_bbox', [0, 0, 1000, 1000]),
-            'outer_polygon': data.get('outer_polygon', []),
-            'circle_center': data.get('circle_center', [0, 0]),
-            'circle_radius': float(data.get('circle_radius', 0.0))
-        }
+        # Standardize containers list (support single or multi container)
+        if 'containers' in data and isinstance(data['containers'], list):
+            containers_data = data['containers']
+        else:
+            containers_data = [{
+                'id': 0,
+                'type': data.get('container_type', 'polygon'),
+                'outer_bbox': data.get('outer_bbox', [0, 0, 1000, 1000]),
+                'outer_polygon': data.get('outer_polygon', []),
+                'circle_center': data.get('circle_center', [0, 0]),
+                'circle_radius': float(data.get('circle_radius', 0.0)),
+                'area': float(data.get('area', 1000000.0))
+            }]
 
+        num_containers = len(containers_data)
         num_cpus = cpu_count()
-        num_strategies = max(num_cpus, 32)
+        num_strategies = max(num_cpus, 36)
 
         tasks = [
-            (s_id, parts_data, outer_data, gap, margin)
+            (s_id, parts_data, containers_data, gap, margin)
             for s_id in range(num_strategies)
         ]
 
-        # Multiprocessing across 20 cores (or direct if <= 4 parts)
-        if total_parts <= 4:
-            results = [solve_nesting_strategy(t) for t in tasks]
+        if total_parts <= 4 and num_containers == 1:
+            results = [solve_multi_strategy(t) for t in tasks]
             mode_str = f"Direct Fast-Path ({num_strategies} Strategies, {total_parts} parts)"
         else:
             with Pool(processes=min(num_cpus, 20)) as pool:
-                results = pool.map(solve_nesting_strategy, tasks)
-            mode_str = f"Multi-Core Multiprocessing ({num_cpus} CPUs, {num_strategies} Strategies, {total_parts} parts)"
+                results = pool.map(solve_multi_strategy, tasks)
+            mode_str = f"Multi-Core Multiprocessing ({num_cpus} CPUs, {num_strategies} Strategies, {num_containers} Containers)"
 
         best_res = max(results, key=lambda r: (r['placed_count'], r['fitness']))
         elapsed = time.time() - t0
@@ -393,20 +392,24 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         is_success = (best_res['placed_count'] == total_parts)
         status_str = "SUCCESS" if is_success else "PARTIAL"
 
-        shape_label = f"Circle/Pipe (Dia {outer_data['circle_radius']*2:.1f})" if container_type == 'circle' else "Curved/Polygon"
-        msg = (f"MBBN Nesting: {best_res['placed_count']}/{total_parts} parts placed "
-               f"in {elapsed*1000.0:.1f}ms [{shape_label} | {mode_str}] (Best Strategy #{best_res['strategy_id']})")
+        msg = (f"MBBN Multi-Container Nesting: {best_res['placed_count']}/{total_parts} parts placed "
+               f"in {elapsed*1000.0:.1f}ms [Yield: {best_res['yield_pct']:.1f}% | Containers Used: {len(best_res['used_containers'])}/{num_containers} | {mode_str}] "
+               f"(Best Strategy #{best_res['strategy_id']})")
 
+        # Generate AutoLISP output file
+        # Format of MBB_NESTING_PLAN: ( (part_id container_id gx gy w h rot) ... )
         plan_lines = []
         for item in best_res['plan']:
-            plan_lines.append(f"  ({item['id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']})")
+            plan_lines.append(f"  ({item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']})")
 
-        lsp_content = f""";;; MBBN NESTING RESULT GENERATED BY PYTHON ENGINE
+        lsp_content = f""";;; MBBN MULTI-CONTAINER NESTING RESULT GENERATED BY PYTHON ENGINE
 ;;; Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
 ;;; Elapsed: {elapsed*1000.0:.2f} ms | Mode: {mode_str}
 (setq MBB_NESTING_STATUS "{status_str}")
 (setq MBB_NESTING_MSG "{msg}")
 (setq MBB_NESTING_COUNT {best_res['placed_count']})
+(setq MBB_TOTAL_YIELD {best_res['yield_pct']:.2f})
+(setq MBB_CONTAINERS_USED {len(best_res['used_containers'])})
 (setq MBB_NESTING_PLAN '(
 {chr(10).join(plan_lines)}
 ))
@@ -423,7 +426,8 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
                 'elapsed_ms': elapsed * 1000.0,
                 'placed_count': best_res['placed_count'],
                 'total_parts': total_parts,
-                'container_type': container_type,
+                'yield_pct': best_res['yield_pct'],
+                'used_containers': best_res['used_containers'],
                 'plan': best_res['plan']
             }
             with open(output_json_path, 'w', encoding='utf-8') as f:

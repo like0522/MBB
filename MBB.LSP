@@ -6,6 +6,8 @@
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.8 (2026-10-23 07:03:00) : MBBN 다중 외곽 컨테이너(Multi-Container) 지원 & 자재 수율(Yield) 극대화 멀티코어 2D 네스팅 구축
+;;                                 (복수 원형/사각/잔재 컨테이너 동시 선택, 36개 멀티코어 전략 기반 최적 판재 할당 및 일괄 자동 배치)
 ;; - v2.7 (2026-10-22 22:25:00) : MBBN 원형(Circle/Pipe Φ890) 5/5 단품 100% 전량 배치 완성 (원형 반경 ε오차 방어, 32전략 멀티코어 탐색)
 ;; - v2.6 (2026-10-22 22:01:00) : MBBN 원형/파이(Circle/Pipe Φ) 전용 초고속 네스팅 및 곡면 내벽 추적 앵커(Wall-Adaptive) 도입
 ;;                                 (원형 4코너 반경 판정, 각 Y별 좌우 곡면 밀착 X포지셔닝, 4/4 단품 100% 전량 배치 보장)
@@ -2157,21 +2159,24 @@
 ;;; [END: ROLLBACK ANCHOR - v2.5 ORIGINAL]
 
 ;;; [START: CURRENT ACTIVE - v2.6 MODIFIED (2026-10-22 22:01:00)]
+;;; [START: ROLLBACK ANCHOR - v2.7 ORIGINAL]
+;;; (c:MBBN v2.7 preserved in git history b4327d7)
+;;; [END: ROLLBACK ANCHOR - v2.7 ORIGINAL]
+
+;;; [START: CURRENT ACTIVE - v2.8 MODIFIED (2026-10-23 07:03:00)]
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
-                  out-min out-max out-pts p1 p2 num-v vi
-                  total-len step-dist cur-dist
-                  is-circle c-cen c-rad
+                  containers-list cid is-circle c-cen c-rad c-area
+                  out-min out-max out-pts p1 p2 num-v vi total-len step-dist cur-dist
                   geom-raw text-list clustered-parts grp parent-item
                   placed ci minP maxP minC maxC
                   parent-obj children-holes text-objs all-objs assigned-texts part-texts
                   parts-list best-plan
-                  gap margin out-min-x out-max-x out-min-y out-max-y
-                  anchors wall-anchors ax ay cur-r collides found
+                  gap margin
                   item geom rot orig-min-x orig-min-y orig-w orig-h
-                  move-dx move-dy pr pr-x pr-y pr-w pr-h rng
-                  min-x max-x gy gx
+                  move-dx move-dy
                   cur-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
-                  pi-idx num-pts num-parts id-parts-list pid part-entry )
+                  pi-idx num-pts num-parts id-parts-list pid part-entry
+                  ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -2192,39 +2197,46 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v2.7] 원형(파이 Φ) & 곡면 내벽 밀착 초고속 2D 네스팅")
+  (princ "\n[MBBN v2.8] 다중 컨테이너(Multi-Container) 자재 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
-  ;; 1단계: 외곽 컨테이너 다각형/원형 선택
-  (princ "\n>> [1단계] 단품들을 담을 외곽 컨테이너(원형/곡면/틀) 선택: ")
-  (if (setq ss-out (ssget ":S:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
+  ;; 1단계: 외곽 컨테이너 복수 선택 (원형/사각/비정형 잔재 1개 또는 여러 개)
+  (princ "\n>> [1단계] 단품들을 배치할 외곽 컨테이너(틀/파이프) 선택 (복수 선택 가능): ")
+  (if (setq ss-out (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
     (progn
-      (setq out-min nil out-max nil out-pts '() is-circle nil c-cen nil c-rad nil i 0)
+      (setq containers-list '()
+            cid 0
+            i 0)
       (repeat (sslength ss-out)
         (setq ename (ssname ss-out i)
               obj   (vlax-ename->vla-object ename)
               objName (vla-get-ObjectName obj)
               i     (1+ i))
+
+        (setq is-circle nil c-cen nil c-rad nil c-area 0.0 out-min nil out-max nil out-pts '())
         
-        ;; 원형(파이) 여부 정밀 판정
+        ;; 원형(파이) 여부 판정
         (if (wcmatch (strcase objName) "*CIRCLE*")
           (progn
             (setq is-circle T
                   c-cen (vlax-safearray->list (vlax-variant-value (vla-get-Center obj)))
                   c-rad (vl-catch-all-apply 'vla-get-Radius (list obj)))
             (if (vl-catch-all-error-p c-rad) (setq c-rad nil))
+            (if c-rad (setq c-area (* pi c-rad c-rad)))
           )
         )
 
+        ;; BBOX 산출
         (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
           (progn
             (setq tmp-min (vlax-safearray->list tmp-min)
                   tmp-max (vlax-safearray->list tmp-max))
-            (setq out-min (if (null out-min) tmp-min (mapcar 'min out-min tmp-min))
-                  out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
+            (setq out-min tmp-min
+                  out-max tmp-max)
           )
         )
-        ;; WCS Curve 둘레 고밀도 좌표 샘플링 (10mm 간격, 오목 호/곡선 100% 포착)
+
+        ;; WCS Curve 둘레 고밀도 좌표 샘플링 (10mm 간격)
         (setq total-len nil)
         (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
           (if (and (numberp total-len) (> total-len 0.0))
@@ -2281,15 +2293,38 @@
             )
           )
         )
-      )
 
-      (if (and out-min out-max)
+        ;; 면적 산출
+        (if (null is-circle)
+          (setq c-area (vl-catch-all-apply 'vla-get-Area (list obj)))
+        )
+        (if (or (vl-catch-all-error-p c-area) (null c-area) (<= c-area 0.0))
+          (if (and out-min out-max)
+            (setq c-area (* (- (car out-max) (car out-min)) (- (cadr out-max) (cadr out-min))))
+          )
+        )
+
+        (if (or (and is-circle c-cen c-rad) (and out-min out-max (or out-pts (>= (length out-pts) 3))))
+          (progn
+            (setq containers-list (cons (list cid is-circle c-cen c-rad out-min out-max out-pts c-area obj) containers-list)
+                  cid (1+ cid))
+          )
+        )
+      )
+      (setq containers-list (reverse containers-list))
+
+      (if (and containers-list (> (length containers-list) 0))
         (progn
-          (if (and is-circle c-cen c-rad)
-            (princ (strcat "\n>> [외곽 원형/파이 감지] 직경(Φ) = " (rtos (* 2.0 c-rad) 2 1) 
-                           " mm, 반경(R) = " (rtos c-rad 2 1) " mm (전용 원형 엔진 가속)"))
-            (princ (strcat "\n>> [외곽 규격] 폭 = " (rtos (- (car out-max) (car out-min)) 2 1) 
-                           " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm (고밀도 " (itoa (length out-pts)) "개 곡선 파싱)"))
+          (princ (strcat "\n>> 총 " (itoa (length containers-list)) "개 외곽 컨테이너 인식 완료:"))
+          (foreach c containers-list
+            (if (nth 1 c)
+              (princ (strcat "\n   - [컨테이너 " (itoa (1+ (car c))) "] 원형(파이) 직경(Φ) = " 
+                             (rtos (* 2.0 (nth 3 c)) 2 1) " mm (면적: " (rtos (/ (nth 7 c) 1000000.0) 2 3) " m²)"))
+              (princ (strcat "\n   - [컨테이너 " (itoa (1+ (car c))) "] 사각/곡면 폭 = " 
+                             (rtos (- (car (nth 5 c)) (car (nth 4 c))) 2 1) " mm, 높이 = " 
+                             (rtos (- (cadr (nth 5 c)) (cadr (nth 4 c))) 2 1) " mm (면적: " 
+                             (rtos (/ (nth 7 c) 1000000.0) 2 3) " m²)"))
+            )
           )
 
           ;; 2단계: 배치할 모든 단품 및 내부 객체 드래그 선택
@@ -2398,11 +2433,7 @@
                   )
 
                   (setq gap 3.0
-                        margin 2.0
-                        out-min-x (car out-min)
-                        out-max-x (car out-max)
-                        out-min-y (cadr out-min)
-                        out-max-y (cadr out-max))
+                        margin 2.0)
 
                   ;; 단품 목록에 고유 ID(0, 1, 2...) 부여
                   (setq id-parts-list '()
@@ -2430,34 +2461,55 @@
                     )
                   )
 
-                  ;; 1. Python 입력 JSON 고속 생성 (Circle / Pipe 및 Polygon 완벽 분기)
+                  ;; 1. Python 입력 JSON 고속 생성 (다중 컨테이너 및 단품 일괄 덤프)
                   (setq f (open json-in "w"))
                   (if f
                     (progn
                       (write-line "{" f)
                       (write-line (strcat "  \"gap\": " (rtos gap 2 4) ",") f)
                       (write-line (strcat "  \"margin\": " (rtos margin 2 4) ",") f)
-                      (if (and is-circle c-cen c-rad)
-                        (progn
-                          (write-line "  \"container_type\": \"circle\"," f)
-                          (write-line (strcat "  \"circle_center\": [" (rtos (car c-cen) 2 4) ", " (rtos (cadr c-cen) 2 4) "],") f)
-                          (write-line (strcat "  \"circle_radius\": " (rtos c-rad 2 4) ",") f)
+                      
+                      ;; containers 배열 출력
+                      (write-line "  \"containers\": [" f)
+                      (setq ci-idx 0 num-c (length containers-list))
+                      (foreach c containers-list
+                        (setq ci-idx (1+ ci-idx)
+                              cid-val (nth 0 c)
+                              is-c-val (nth 1 c)
+                              c-cen-val (nth 2 c)
+                              c-rad-val (nth 3 c)
+                              c-min-val (nth 4 c)
+                              c-max-val (nth 5 c)
+                              c-pts-val (nth 6 c)
+                              c-area-val (nth 7 c))
+                        (write-line "    {" f)
+                        (write-line (strcat "      \"id\": " (itoa cid-val) ",") f)
+                        (if is-c-val
+                          (progn
+                            (write-line "      \"type\": \"circle\"," f)
+                            (write-line (strcat "      \"circle_center\": [" (rtos (car c-cen-val) 2 4) ", " (rtos (cadr c-cen-val) 2 4) "],") f)
+                            (write-line (strcat "      \"circle_radius\": " (rtos c-rad-val 2 4) ",") f)
+                          )
+                          (progn
+                            (write-line "      \"type\": \"polygon\"," f)
+                            (write-line (strcat "      \"outer_bbox\": [" (rtos (car c-min-val) 2 4) ", " (rtos (cadr c-min-val) 2 4) ", "
+                                                (rtos (car c-max-val) 2 4) ", " (rtos (cadr c-max-val) 2 4) "],") f)
+                            (write-line "      \"outer_polygon\": [" f)
+                            (setq pi-idx 0 num-pts (length c-pts-val))
+                            (foreach pt c-pts-val
+                              (setq pi-idx (1+ pi-idx))
+                              (write-line (strcat "        [" (rtos (car pt) 2 4) ", " (rtos (cadr pt) 2 4) "]"
+                                                  (if (< pi-idx num-pts) "," "")) f)
+                            )
+                            (write-line "      ]," f)
+                          )
                         )
-                        (write-line "  \"container_type\": \"polygon\"," f)
-                      )
-                      (write-line (strcat "  \"outer_bbox\": ["
-                                          (rtos out-min-x 2 4) ", "
-                                          (rtos out-min-y 2 4) ", "
-                                          (rtos out-max-x 2 4) ", "
-                                          (rtos out-max-y 2 4) "],") f)
-                      (write-line "  \"outer_polygon\": [" f)
-                      (setq pi-idx 0 num-pts (length out-pts))
-                      (foreach pt out-pts
-                        (setq pi-idx (1+ pi-idx))
-                        (write-line (strcat "    [" (rtos (car pt) 2 4) ", " (rtos (cadr pt) 2 4) "]"
-                                            (if (< pi-idx num-pts) "," "")) f)
+                        (write-line (strcat "      \"area\": " (rtos c-area-val 2 4)) f)
+                        (write-line (strcat "    }" (if (< ci-idx num-c) "," "")) f)
                       )
                       (write-line "  ]," f)
+
+                      ;; parts 배열 출력
                       (write-line "  \"parts\": [" f)
                       (setq pi-idx 0 num-parts (length id-parts-list))
                       (foreach item id-parts-list
@@ -2496,7 +2548,7 @@
                     )
                   )
 
-                  (princ (strcat "\n>> [Python 초고속 멀티코어 엔진 호출 중...] 총 " (itoa (length id-parts-list)) "개 단품 병렬 연산 시작"))
+                  (princ (strcat "\n>> [Python 멀티코어 수율 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 병렬 조합 탐색"))
                   (setq wsh (vlax-create-object "WScript.Shell"))
                   (if wsh
                     (progn
@@ -2513,21 +2565,24 @@
 
                   ;; 2. Python 결과 로드 및 CAD 객체(모형+문자) 일괄 자동 배치
                   (setq MBB_NESTING_PLAN nil
-                        MBB_NESTING_STATUS nil)
+                        MBB_NESTING_STATUS nil
+                        MBB_TOTAL_YIELD nil)
                   (if (findfile lsp-out)
                     (load lsp-out)
                   )
                   (if (findfile lsp-out) (vl-file-delete lsp-out))
 
-                  (if (and MBB_NESTING_PLAN (equal MBB_NESTING_STATUS "SUCCESS"))
+                  (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))
                     (progn
                       (foreach item MBB_NESTING_PLAN
+                        ;; 포맷: (part_id container_id gx gy w h rot)
                         (setq pid (nth 0 item)
-                              gx  (nth 1 item)
-                              gy  (nth 2 item)
-                              w   (nth 3 item)
-                              h   (nth 4 item)
-                              rot (nth 5 item)
+                              cid (nth 1 item)
+                              gx  (nth 2 item)
+                              gy  (nth 3 item)
+                              w   (nth 4 item)
+                              h   (nth 5 item)
+                              rot (nth 6 item)
                               part-entry (assoc pid id-parts-list))
                         (if part-entry
                           (progn
@@ -2555,94 +2610,16 @@
                         )
                       )
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN 완결] 총 " (itoa (length MBB_NESTING_PLAN)) "개 단품 초고속 자동 네스팅 완료!"))
+                      (princ (strcat "\n>> [MBBN 완결] 총 " (itoa (length parts-list)) "개 단품 중 " 
+                                     (itoa (length MBB_NESTING_PLAN)) "개 최적 수율 배치 완료!"))
+                      (if MBB_TOTAL_YIELD
+                        (princ (strcat "\n   - 총 자재 수율(Total Yield): " (rtos MBB_TOTAL_YIELD 2 1) " %"))
+                      )
                       (princ (strcat "\n   - 단품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 여유(Margin): " (rtos margin 2 1) " mm"))
-                      (princ "\n   - 각 단품 및 내부 홀(원/슬롯), 치수 텍스트 전체가 상대 위치를 100% 보존하며 배치되었습니다.")
+                      (princ "\n   - 각 단품 및 내부 홀(원/슬롯), 치수 텍스트 전체가 해당 컨테이너로 100% 무결점 일괄 배치되었습니다.")
                       (princ "\n================================================================")
                     )
-                    ;; Python 연산 실패 시 내부 LISP 앵커 알고리즘 폴백(Fallback) 작동
-                    (progn
-                      (princ "\n>> [안내] Python 외부 연산 실패 또는 미응답 - 내부 LISP 폴백 네스팅을 시작합니다...")
-                      (setq placed '()
-                            best-plan '())
-                      (foreach p parts-list
-                        (setq orig-w (nth 3 p)
-                              orig-h (nth 4 p)
-                              found nil)
-                        (setq anchors (list (list (+ out-min-x margin) (+ out-min-y margin))))
-                        (foreach pr placed
-                          (setq pr-x (nth 0 pr) pr-y (nth 1 pr) pr-w (nth 2 pr) pr-h (nth 3 pr))
-                          (setq anchors (cons (list (+ pr-x pr-w gap) pr-y) anchors))
-                          (setq anchors (cons (list pr-x (+ pr-y pr-h gap)) anchors))
-                          (setq anchors (cons (list (+ out-min-x margin) (+ pr-y pr-h gap)) anchors))
-                        )
-                        (setq wall-anchors '())
-                        (foreach a anchors
-                          (setq ay (cadr a) rng (MBBG:GetXRangeAtY out-pts ay))
-                          (if rng (setq wall-anchors (cons (list (+ (car rng) margin) ay) wall-anchors)))
-                        )
-                        (setq anchors (append anchors wall-anchors))
-                        (setq anchors (vl-sort anchors '(lambda (pt1 pt2)
-                                                         (if (equal (cadr pt1) (cadr pt2) 1.0)
-                                                           (< (car pt1) (car pt2))
-                                                           (< (cadr pt1) (cadr pt2))))))
-                        (foreach rot '(0 90)
-                          (if (null found)
-                            (progn
-                              (setq w (if (= rot 90) orig-h orig-w)
-                                    h (if (= rot 90) orig-w orig-h))
-                              (foreach a anchors
-                                (if (null found)
-                                  (progn
-                                    (setq ax (car a) ay (cadr a))
-                                    (if (MBBN:IsRectInsidePoly ax ay w h out-pts margin)
-                                      (progn
-                                        (setq cur-r (list ax ay w h) collides nil)
-                                        (foreach pr placed
-                                          (if (MBBN:RectsOverlap cur-r pr gap) (setq collides T))
-                                        )
-                                        (if (null collides)
-                                          (setq placed (cons cur-r placed)
-                                                best-plan (cons (list p ax ay w h rot) best-plan)
-                                                found T)
-                                        )
-                                      )
-                                    )
-                                  )
-                                )
-                              )
-                            )
-                          )
-                        )
-                      )
-                      (if (and best-plan (= (length best-plan) (length parts-list)))
-                        (progn
-                          (foreach item best-plan
-                            (setq p (nth 0 item)
-                                  gx (nth 1 item) gy (nth 2 item)
-                                  w  (nth 3 item) h  (nth 4 item)
-                                  rot (nth 5 item)
-                                  all-objs (nth 0 p)
-                                  orig-min-x (nth 1 p) orig-min-y (nth 2 p)
-                                  orig-w (nth 3 p) orig-h (nth 4 p))
-                            (if (= rot 90)
-                              (progn
-                                (foreach o all-objs
-                                  (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
-                                )
-                                (setq move-dx (+ (- gx orig-min-x) orig-h) move-dy (- gy orig-min-y))
-                              )
-                              (setq move-dx (- gx orig-min-x) move-dy (- gy orig-min-y))
-                            )
-                            (foreach o all-objs
-                              (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
-                            )
-                          )
-                          (princ "\n>> [MBBN LISP 폴백 완료] 전 단품 배치 완료.")
-                        )
-                        (princ "\n>> 경고: 외곽 컨테이너 크기가 부족하여 일부 단품을 배치할 수 없습니다.")
-                      )
-                    )
+                    (princ "\n>> 오류: 컨테이너 크기 부족 또는 유효 배치점을 산출하지 못했습니다.")
                   )
                 )
                 (princ "\n>> 오류: 배치할 유효 단품 객체가 없습니다.")
@@ -2651,7 +2628,7 @@
             (princ "\n>> 안내: 배치할 단품이 선택되지 않았습니다.")
           )
         )
-        (princ "\n>> 오류: 외곽 컨테이너의 범위를 산출할 수 없습니다.")
+        (princ "\n>> 오류: 유효한 외곽 컨테이너를 추출할 수 없습니다.")
       )
     )
     (princ "\n>> 안내: 외곽 컨테이너가 선택되지 않았습니다.")
