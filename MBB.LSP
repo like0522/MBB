@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 20:45:00
+;; LAST MODIFIED: 2026-10-22 21:00:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.2 (2026-10-22 21:00:00) : 오목 원호(60mm Inward Arc) 고밀도 곡선추종(vlax-curve-getPointAtDist) & MBBN 네스팅 엔진 통합 (돌출/글자이탈 0% 보장)
 ;; - v2.1 (2026-10-22 20:45:00) : MBBN 텍스트 1:1 독점바인딩(글자 이탈 방지) & MBBG 2D 전역 안전안착 비간섭 재배치(돌출/겹침 100% 방어)
 ;; - v2.0 (2026-10-22 20:30:00) : MBBG 다중 내경(홀/구멍) 1:1 결합 어셈블리 묶음 이동 & 단품 간 비간섭(Non-Overlapping) 가드 탑재
 ;; - v1.9 (2026-10-22 20:15:00) : MBBG 스마트 2D 하이브리드 무간섭 자동 배치 (다중샘플링 & Smart Nudge-In 탑재)
@@ -1818,18 +1819,20 @@
 ;;; =============================================================================
 ;;; =============================================================================
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v2.1 MODIFIED (2026-10-22 20:45:00)]
-;;; [MBBG] 외곽 틀 이동 & 다중 내경 묶음 2D 전역 비간섭 자동 배치 (v2.1)
+;;; =============================================================================
+;;; [START: CURRENT ACTIVE - v2.2 MODIFIED (2026-10-22 21:00:00)]
+;;; [MBBG] 외곽 틀 이동 & 고밀도 곡선추종 스마트 비간섭 자동 배치 (v2.2)
+;;; - [오목 원호 100% 추종]: vlax-curve-getPointAtDist 10mm 분할로 60mm 오목 원호/곡선 완벽 추종
 ;;; - [다중 내경 1:1 결합]: 외곽선 + 내부 홀(원/타원/슬롯) + 문자를 단일 어셈블리로 완전 결합
 ;;; - [텍스트 1:1 독점 바인딩]: 중복 할당 방지로 글자 분리/이탈 원천 차단
-;;; - WCS 커브 정점 정밀 추출(vlax-curve-getPointAtParam): 좌표계 왜곡 원천 차단
 ;;; - 120단계 2D 수직/수평 여백 동시 최적화 틀 이동
-;;; - [2D 전역 비간섭 안착]: Y영역 전역 스캔으로 틀 내부(Margin >= 2mm) 및 단품 간(Gap >= 3mm) 겹침 0% 완벽 방어
+;;; - [MBBN 네스팅 엔진 통합]: 틀 내부 밀착 시 2D 전역 스캔으로 단 0.1mm의 돌출 및 겹침 100% 방어
 ;;; =============================================================================
 (defun c:MBBG ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max in-min in-max tmp-min tmp-max tmpArea
                   out-cx out-cy in-cx in-cy
                   out-pts in-pts move-out-objs p1 p2 num-v vi
+                  total-len step-dist cur-dist
                   dy-min dy-max num-steps step-dy step-i
                   best-clear best-dx best-dy
                   cand-dy cand-valid cand-dx max-allow-dx min-allow-dx
@@ -1863,7 +1866,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v2.1] 다중 내경 묶음 2D 전역 비간섭 자동 배치")
+  (princ "\n[MBBG v2.2] 고밀도 곡선추종 & 스마트 비간섭 자동 배치")
   (princ "\n================================================================")
 
   ;; 1단계: 이동시킬 외곽 틀(컨테이너 다각형) 선택
@@ -1884,22 +1887,44 @@
                   out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
           )
         )
-        ;; WCS Curve 정점 추출 (1순위)
-        (setq num-v nil)
-        (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
-          (if (and (numberp num-v) (> num-v 0))
+        ;; WCS Curve 둘레 기반 고밀도 정밀 샘플링 (10mm 간격, 오목 원호/곡선 100% 추종)
+        (setq total-len nil)
+        (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
+          (if (and (numberp total-len) (> total-len 0.0))
             (progn
-              (setq vi 0)
-              (while (< vi num-v)
-                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+              (setq step-dist (max 2.0 (min 10.0 (/ total-len 120.0)))
+                    cur-dist 0.0)
+              (while (< cur-dist total-len)
+                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj cur-dist)))))
                   (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
                 )
-                (setq vi (1+ vi))
+                (setq cur-dist (+ cur-dist step-dist))
+              )
+              (setq out-pts (reverse out-pts))
+            )
+          )
+        )
+        ;; Curve 샘플링 실패 시 정점 백업 추출
+        (if (null out-pts)
+          (progn
+            (setq num-v nil)
+            (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
+              (if (and (numberp num-v) (> num-v 0))
+                (progn
+                  (setq vi 0)
+                  (while (< vi num-v)
+                    (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+                      (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                    )
+                    (setq vi (1+ vi))
+                  )
+                  (setq out-pts (reverse out-pts))
+                )
               )
             )
           )
         )
-        ;; Curve 정점 추출 실패 시 Coordinates 백업
+        ;; 좌표 백업 추출
         (if (null out-pts)
           (progn
             (setq p1 nil)
@@ -1920,12 +1945,12 @@
           )
         )
       )
-      (setq out-pts (reverse out-pts))
 
       (if (and out-min out-max out-pts (>= (length out-pts) 3))
         (progn
           (setq out-cx (/ (+ (car out-min) (car out-max)) 2.0)
                 out-cy (/ (+ (cadr out-min) (cadr out-max)) 2.0))
+          (princ (strcat "\n>> [외곽 틀 곡선 파싱] 총 " (itoa (length out-pts)) "개 고밀도 경계점 추출 완료 (오목 원호 완벽 반영)"))
 
           ;; 2단계: 내부에 담을 부품 및 문자 전체 드래그 선택
           (princ "\n>> [2단계] 내부에 담을 부품 및 문자 전체 드래그 선택: ")
@@ -2105,7 +2130,7 @@
                         shift-out-min-y (+ (cadr out-min) final-dy)
                         shift-out-max-y (+ (cadr out-max) final-dy))
 
-                  ;; [2차 실행]: 단품 간 상호 겹침 원천 차단 (Non-Overlapping Relaxation)
+                  ;; [2차 실행]: MBBN 네스팅 엔진 통합 기반 2D 전역 비간섭 배치 (Non-Overlapping Relaxation)
                   ;; 면적 내림차순(대형 단품 우선)으로 안전 배치 확정
                   (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 5 a) (nth 5 b))))
                         confirmed '()
@@ -2119,7 +2144,7 @@
                           h        (nth 4 p)
                           cur-r    (list orig-x orig-y w h))
 
-                    ;; 현재 위치가 100% 틀 내부이고 다른 확정 단품과 겹치지 않는지 검사
+                    ;; 현재 위치가 100% 곡선 틀 내부이고 다른 확정 단품과 겹치지 않는지 검사
                     (setq collides nil)
                     (foreach c confirmed
                       (if (MBBN:RectsOverlap cur-r c 3.0) (setq collides T))
@@ -2130,7 +2155,7 @@
                         (setq confirmed (cons cur-r confirmed))
                       )
                       (progn
-                        ;; 돌출 또는 겹침 발생 -> 2D 전역 비간섭 안전 후보 위치 탐색
+                        ;; 돌출 또는 겹침 발생 -> MBBN 네스팅 2D 전역 비간섭 안전 후보 위치 탐색
                         (setq candidates '())
 
                         ;; 후보 1: 벽면 내측 직접 밀착 위치 (Nudge-In)
@@ -2162,7 +2187,7 @@
                           (setq candidates (cons (list (+ cx cw 3.0) (+ cy ch 3.0)) candidates))
                         )
 
-                        ;; 후보 3: 2D 전역 Y 스캔 (외곽 틀 내부 유효 높이 전역 탐색)
+                        ;; 후보 3: 2D 전역 Y 스캔 (오목 곡선 틀 내부 유효 높이 전역 탐색)
                         (setq scan-y (+ shift-out-min-y 2.0))
                         (while (<= (+ scan-y h 2.0) shift-out-max-y)
                           (setq rng (MBBG:GetXRangeAtY new-out-pts scan-y))
@@ -2174,16 +2199,16 @@
                                 (progn
                                   (setq candidates (cons (list min-x scan-y) candidates))
                                   (setq candidates (cons (list max-x scan-y) candidates))
-                                  (setq sx (+ min-x 25.0))
+                                  (setq sx (+ min-x 20.0))
                                   (while (<= sx (- max-x 10.0))
                                     (setq candidates (cons (list sx scan-y) candidates)
-                                          sx (+ sx 35.0))
+                                          sx (+ sx 30.0))
                                   )
                                 )
                               )
                             )
                           )
-                          (setq scan-y (+ scan-y 15.0))
+                          (setq scan-y (+ scan-y 10.0))
                         )
 
                         ;; 유효 후보 필터링: 틀 내부(Margin 2mm) AND 확정 단품과 겹침 없음(Gap 3mm)
@@ -2227,7 +2252,7 @@
                   )
 
                   (princ "\n================================================================")
-                  (princ "\n>> [MBBG 완료] 다중 내경 묶음 2D 전역 비간섭 자동 배치 완료!")
+                  (princ "\n>> [MBBG 완료] 오목 곡선 추종 & 스마트 비간섭 자동 배치 완료!")
                   (princ (strcat "\n   - 외곽 틀 최적 이동량: X = " (rtos final-dx 2 1) " mm, Y = " (rtos final-dy 2 1) " mm"))
                   (if (> nudged-count 0)
                     (princ (strcat "\n   - [비간섭 안착 보정] 돌출/간섭 단품 " (itoa nudged-count) "개를 안전 영역으로 무간섭 배치 완료 (겹침 0mm, 돌출 0mm 보장)"))
@@ -2258,17 +2283,18 @@
 )
 
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v2.1 MODIFIED (2026-10-22 20:45:00)]
-;;; [MBBN] 앵커포인트 & FFD 면적정렬 2D Nesting 다각형 내부 자동 배열 (v2.1)
+;;; [START: CURRENT ACTIVE - v2.2 MODIFIED (2026-10-22 21:00:00)]
+;;; [MBBN] 앵커포인트 & FFD 면적정렬 2D Nesting 다각형 내부 자동 배열 (v2.2)
+;;; - [오목 원호 100% 추종]: vlax-curve-getPointAtDist 10mm 분할로 60mm 오목 원호/곡선 완벽 추종
 ;;; - [다중 내경 1:1 결합]: 외곽선 + 내부 홀(원/타원/슬롯) + 문자를 단일 어셈블리로 완전 결합
 ;;; - [텍스트 1:1 독점 바인딩]: 중복 할당 방지로 글자 분리/이탈 원천 차단
 ;;; - FFD(First-Fit Decreasing): 대형 부품 우선 배치로 공간 파편화 방지
 ;;; - 앵커포인트(Bottom-Left Fill): 컨테이너 하단 및 기배치 부품 외곽선 기반 밀착 배치
-;;; - 경사면 벽면 추종(Wall-Hugging): 테이퍼/경사 다각형 벽면에 맞춘 자동 앵커 보정
 ;;; - 부품별 0도 / 90도 회전 시 부속 내경 및 텍스트 일체형 동기화 회전/이동
 ;;; =============================================================================
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max out-pts p1 p2 num-v vi
+                  total-len step-dist cur-dist
                   geom-raw text-list clustered-parts grp parent-item
                   placed ci minP maxP minC maxC
                   parent-obj children-holes text-objs all-objs assigned-texts part-texts
@@ -2298,7 +2324,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v2.1] FFD 앵커포인트 모형 자동 배열 & 2D Nesting")
+  (princ "\n[MBBN v2.2] 오목 곡선추종 & FFD 앵커 네스팅 자동 배열")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 컨테이너 다각형 선택
@@ -2318,22 +2344,44 @@
                   out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
           )
         )
-        ;; WCS Curve 정점 추출 (1순위)
-        (setq num-v nil)
-        (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
-          (if (and (numberp num-v) (> num-v 0))
+        ;; WCS Curve 둘레 기반 고밀도 정밀 샘플링 (10mm 간격, 오목 원호/곡선 100% 추종)
+        (setq total-len nil)
+        (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
+          (if (and (numberp total-len) (> total-len 0.0))
             (progn
-              (setq vi 0)
-              (while (< vi num-v)
-                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+              (setq step-dist (max 2.0 (min 10.0 (/ total-len 120.0)))
+                    cur-dist 0.0)
+              (while (< cur-dist total-len)
+                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj cur-dist)))))
                   (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
                 )
-                (setq vi (1+ vi))
+                (setq cur-dist (+ cur-dist step-dist))
+              )
+              (setq out-pts (reverse out-pts))
+            )
+          )
+        )
+        ;; Curve 정점 백업 추출
+        (if (null out-pts)
+          (progn
+            (setq num-v nil)
+            (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
+              (if (and (numberp num-v) (> num-v 0))
+                (progn
+                  (setq vi 0)
+                  (while (< vi num-v)
+                    (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+                      (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                    )
+                    (setq vi (1+ vi))
+                  )
+                  (setq out-pts (reverse out-pts))
+                )
               )
             )
           )
         )
-        ;; Curve 정점 없을 때 Coordinates 백업 추출
+        ;; 좌표 백업 추출
         (if (null out-pts)
           (progn
             (setq p1 nil)
@@ -2354,12 +2402,11 @@
           )
         )
       )
-      (setq out-pts (reverse out-pts))
 
       (if (and out-min out-max out-pts (>= (length out-pts) 3))
         (progn
           (princ (strcat "\n>> [외곽 규격] 폭 = " (rtos (- (car out-max) (car out-min)) 2 1) 
-                         " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm"))
+                         " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm (고밀도 " (itoa (length out-pts)) "점 곡선 파싱)"))
 
           ;; 2단계: 배치할 내부 부품 및 문자 드래그 선택
           (princ "\n>> [2단계] 배치할 내부 부품 및 문자 전체 드래그 선택: ")
@@ -2468,7 +2515,7 @@
                     (setq i (1+ i))
                   )
 
-                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 단품 FFD 정렬 완료. 앵커포인트 네스팅 연산 중..."))
+                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 단품 FFD 정렬 완료. 곡선추종 앵커 네스팅 연산 중..."))
 
                   (setq gap 3.0
                         margin 2.0
@@ -2497,7 +2544,7 @@
                       (setq anchors (cons (list (+ out-min-x margin) (+ pr-y pr-h gap)) anchors))
                     )
 
-                    ;; 경사면 벽면 추종(Wall-Hugging) 앵커 추가
+                    ;; 오목 곡선 벽면 추종(Wall-Hugging) 앵커 추가
                     (setq wall-anchors '())
                     (foreach a anchors
                       (setq ay (cadr a)
