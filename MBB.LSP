@@ -1705,10 +1705,10 @@
 
 (princ "\n  6. MBBW   : 도형의 무게 중심 (Centroid) 표시")
 
-(princ "\n  7. PCLOSE : 폴리선 닫기
-  8. MBBG   : 외곽 틀 내부 균등 여백 자동 배치 (문자 제외 순수 기하 기준)
-  9. MBBUI  : 
-  8. MBBUI  : DCL 통합 관리 창 실행선택한 폴리선/스플라인 강제 닫기 (Close)")
+(princ "\n  7. PCLOSE : 폴리선 닫기 (Close)")
+(princ "\n  8. MBBG   : 외곽 틀 내부 균등 여백 자동 배치 (내부 부품 고정)")
+(princ "\n  9. MBBN   : 외곽 틀 내부 그리드 세분화 모형 자동 배열 (2D Nesting)")
+(princ "\n 10. MBBUI  : DCL 통합 관리 창 실행")
 
 (princ "\n--------------------------------------------------------------------------------")
 
@@ -2278,11 +2278,12 @@
   (write-line "  }" fp)
   (write-line "  : boxed_column {" fp)
   (write-line "    label = \"Utilities\";" fp)
-  (write-line "    : button { key = \"btn_pclose\"; label = \"7. PCLOSE (Close Polylines)\"; }
-  }
-  : boxed_column {
-    label = \"Alignment & Placement\";
-    : button { key = \"btn_mbbg\"; label = \"8. MBBG (Equal Margin Align)\"; }\n: button { key = \"btn_mbbn\"; label = \"9. MBBN (Grid Auto Nesting)\"; }" fp)
+  (write-line "    : button { key = \"btn_pclose\"; label = \"7. PCLOSE (Close Polylines)\"; }" fp)
+  (write-line "  }" fp)
+  (write-line "  : boxed_column {" fp)
+  (write-line "    label = \"Alignment & Placement\";" fp)
+  (write-line "    : button { key = \"btn_mbbg\"; label = \"8. MBBG (Equal Margin Align)\"; }" fp)
+  (write-line "    : button { key = \"btn_mbbn\"; label = \"9. MBBN (Grid Auto Nesting)\"; }" fp)
   (write-line "  }" fp)
   (write-line "  spacer;" fp)
   (write-line "  ok_cancel;" fp)
@@ -2312,7 +2313,8 @@ Error: DCL 대화상자를 생성할 수 없습니다.")
   (action_tile "btn_mbbci" "(done_dialog 5)")
   (action_tile "btn_mbbw" "(done_dialog 6)")
   (action_tile "btn_pclose" "(done_dialog 7)")
-  (action_tile "btn_mbbg" "(done_dialog 8)")\n  (action_tile "btn_mbbn" "(done_dialog 9)")
+  (action_tile "btn_mbbg" "(done_dialog 8)")
+  (action_tile "btn_mbbn" "(done_dialog 9)")
   (action_tile "cancel" "(done_dialog 0)")
   
   (setq action (start_dialog))
@@ -2332,7 +2334,8 @@ Error: DCL 대화상자를 생성할 수 없습니다.")
     ((= action 5) (c:MBBCI))
     ((= action 6) (c:MBBW))
     ((= action 7) (c:PCLOSE))
-    ((= action 8) (c:MBBG))\n    ((= action 9) (c:MBBN))
+    ((= action 8) (c:MBBG))
+    ((= action 9) (c:MBBN))
   )
   (setq *MBB_DCL_THK* nil)
   (princ)
