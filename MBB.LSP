@@ -2,13 +2,14 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 18:41:30
+;; LAST MODIFIED: 2026-10-22 18:54:30
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
 ;; - v1.0 (2026-04-06 00:00:00) : 최초 MBB 바운딩 박스 & 형상 분석기 안정화
 ;; - v1.1 (2026-09-12 13:48:40) : ExtractPoints 무손실 추출 및 직교 스냅 필터 적용
 ;; - v1.2 (2026-10-22 18:41:30) : MBBG 신규 추가 (문자 제외 순수 기하 기준 외곽 균등 여백 자동 배치)
+;; - v1.3 (2026-10-22 18:54:30) : MBBG 외곽 모형 역이동 및 다각형 간섭 방지 최적화 (침범 0mm 보정)
 ;; =============================================================================
 ;;
 ;; [명령어 구성]
@@ -1726,16 +1727,48 @@
 ;; =============================================================================
 
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v1.2 MODIFIED (2026-10-22 18:41:30)]
-;;; [MBBG] 외곽 기준 모형 내부 균등 여백 자동 배치 (Equal Margin Alignment)
-;;; - 문자는 내부 배치 여백(BBOX) 계산에서 완전히 배제
-;;; - 순수 기하 형상(폴리선/원/선 등)만으로 외곽 여백(Gap X, Gap Y)을 균등 산출
-;;; - 부속 문자(TEXT, MTEXT)는 부품과 함께 동일 벡터로 안전 이동
+;;; [START: CURRENT ACTIVE - v1.3 MODIFIED (2026-10-22 18:54:30)]
+;;; [MBBG] 외곽 모형 역이동 및 다각형 간섭 방지 최적 배치 (Interference-Free Outer Shifting)
+;;; - 내부 부품(부품+문자)은 원래 자리에 완전 고정
+;;; - 외곽 모형(틀)이 자동으로 이동하여 내부 부품군을 100% 감싸도록 역이동
+;;; - 다각형 경사면 침범(돌출) 자동 검출 및 안전 여백 최적화 (방안 B 완결)
+;;; - 문자는 내부 배치 여백(BBOX) 계산에서 완전 배제
 ;;; =============================================================================
+
+;; 임의 Y 높이에서 다각형의 좌우 X 경계 산출 헬퍼 함수
+(defun MBBG:GetXRangeAtY ( poly y / xs i n p1 p2 y1 y2 x1 x2 t-val )
+  (setq xs '() n (length poly) i 0)
+  (repeat n
+    (setq p1 (nth i poly)
+          p2 (nth (rem (1+ i) n) poly)
+          y1 (cadr p1)
+          y2 (cadr p2)
+          x1 (car p1)
+          x2 (car p2)
+          i  (1+ i))
+    (if (and (<= (min y1 y2) y) (<= y (max y1 y2)))
+      (if (equal y1 y2 1e-6)
+        (setq xs (cons x1 (cons x2 xs)))
+        (progn
+          (setq t-val (/ (- y y1) (- y2 y1)))
+          (setq xs (cons (+ x1 (* t-val (- x2 x1))) xs))
+        )
+      )
+    )
+  )
+  (if (>= (length xs) 2)
+    (list (apply 'min xs) (apply 'max xs))
+    nil
+  )
+)
+
 (defun c:MBBG ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max in-min in-max tmp-min tmp-max
                   out-cx out-cy in-cx in-cy dx dy
-                  gap-x gap-y move-objs )
+                  out-pts in-pts move-out-objs p1 p2
+                  temp-poly max-over-r max-over-l min-clear-r min-clear-l
+                  x-rng xl xr cl cr corr-x final-dx final-dy
+                  all-inside final-min-clear )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -1746,7 +1779,8 @@
       (vl-catch-all-apply 'vla-EndUndoMark (list acDoc))
     )
     (if (and msg (not (wcmatch (strcase msg t) "*break*,*cancel*,*exit*")))
-      (princ (strcat "\n>> [MBBG 오류]: " msg))
+      (princ (strcat "
+>> [MBBG 오류]: " msg))
     )
     (setvar 'CMDECHO 1)
     (princ)
@@ -1755,107 +1789,178 @@
   (setvar 'CMDECHO 0)
   (vla-StartUndoMark acDoc)
 
-  (princ "\n================================================================")
-  (princ "\n[MBBG] 외곽 모형 내부 균등 여백 자동 배치 (문자 제외 순수 기하 기준)")
-  (princ "\n================================================================")
+  (princ "
+================================================================")
+  (princ "
+[MBBG] 외곽 모형 역이동 및 간섭 방지 최적 배치 (문자 제외 순수 기하)")
+  (princ "
+================================================================")
 
   ;; 1단계: 외곽 기준 모형 선택
-  (princ "\n>> [1단계] 외곽 기준 모형(컨테이너 틀) 선택: ")
+  (princ "
+>> [1단계] 이동시킬 외곽 모형(컨테이너 틀) 선택: ")
   (if (setq ss-out (ssget ":S:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
     (progn
-      (setq out-min nil out-max nil i 0)
+      (setq out-min nil out-max nil out-pts '() move-out-objs '() i 0)
       (repeat (sslength ss-out)
         (setq ename (ssname ss-out i)
               obj   (vlax-ename->vla-object ename)
+              move-out-objs (cons obj move-out-objs)
               i     (1+ i))
         (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
           (progn
             (setq tmp-min (vlax-safearray->list tmp-min)
                   tmp-max (vlax-safearray->list tmp-max))
-            (if (null out-min)
-              (setq out-min tmp-min out-max tmp-max)
-              (setq out-min (mapcar 'min out-min tmp-min)
-                    out-max (mapcar 'max out-max tmp-max))
+            (setq out-min (if (null out-min) tmp-min (mapcar 'min out-min tmp-min))
+                  out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
+          )
+        )
+        ;; 외곽 폴리선 정점 추출
+        (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
+          (progn
+            (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
+            (while p2
+              (setq out-pts (cons (list (car p2) (cadr p2)) out-pts))
+              (setq p2 (cddr p2))
             )
           )
         )
       )
+      (setq out-pts (reverse out-pts))
 
       (if (and out-min out-max)
         (progn
           (setq out-cx (/ (+ (car out-min) (car out-max)) 2.0)
                 out-cy (/ (+ (cadr out-min) (cadr out-max)) 2.0))
 
-          ;; 2단계: 내부에 배치할 객체들 선택 (부품 + 문자)
-          (princ "\n>> [2단계] 내부에 배치할 부품 및 문자 객체들 모두 선택: ")
+          ;; 2단계: 내부에 수용될 부품 및 문자 객체들 선택 (고정 대상)
+          (princ "
+>> [2단계] 고정시킬 내부 부품 및 문자 객체들 모두 선택: ")
           (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
             (progn
-              (setq in-min nil in-max nil move-objs '() i 0)
+              (setq in-min nil in-max nil in-pts '() i 0)
               (repeat (sslength ss-in)
                 (setq ename (ssname ss-in i)
                       obj   (vlax-ename->vla-object ename)
                       objName (vla-get-objectname obj)
-                      move-objs (cons obj move-objs)
                       i     (1+ i))
-                ;; [규칙]: 문자는 BBOX 여백 계산에서 완전 배제! 순수 기하 객체만 결합 BBOX 계산
+                ;; [규칙]: 문자는 BBOX 여백 계산에서 배제하고 순수 기하 객체만 측정
                 (if (not (wcmatch (strcase objName) "*TEXT*"))
                   (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
                     (progn
                       (setq tmp-min (vlax-safearray->list tmp-min)
                             tmp-max (vlax-safearray->list tmp-max))
-                      (if (null in-min)
-                        (setq in-min tmp-min in-max tmp-max)
-                        (setq in-min (mapcar 'min in-min tmp-min)
-                              in-max (mapcar 'max in-max tmp-max))
-                      )
+                      (setq in-min (if (null in-min) tmp-min (mapcar 'min in-min tmp-min))
+                            in-max (if (null in-max) tmp-max (mapcar 'max in-max tmp-max)))
+                      ;; 부품의 4개 꼭짓점 코너를 검사점에 추가
+                      (setq in-pts (cons (list (car tmp-min) (cadr tmp-min))
+                                   (cons (list (car tmp-max) (cadr tmp-min))
+                                   (cons (list (car tmp-max) (cadr tmp-max))
+                                   (cons (list (car tmp-min) (cadr tmp-max)) in-pts)))))
                     )
                   )
                 )
               )
 
-              (if (and in-min in-max)
+              (if (and in-min in-max out-min out-max)
                 (progn
                   (setq in-cx (/ (+ (car in-min) (car in-max)) 2.0)
                         in-cy (/ (+ (cadr in-min) (cadr in-max)) 2.0))
-                  ;; 중심 정렬 이동 벡터 (dx, dy)
-                  (setq dx (- out-cx in-cx)
-                        dy (- out-cy in-cy))
 
-                  ;; 좌우 / 상하 남는 여백(Gap) 산출
-                  (setq gap-x (/ (- (- (car out-max) (car out-min)) (- (car in-max) (car in-min))) 2.0)
-                        gap-y (/ (- (- (cadr out-max) (cadr out-min)) (- (cadr in-max) (cadr in-min))) 2.0))
+                  ;; 1차 이동 벡터: 내부 부품 중심에 외곽 모형 중심 맞춤
+                  (setq dx (- in-cx out-cx)
+                        dy (- in-cy out-cy))
 
-                  ;; 선택된 모든 객체(기하 부품 + 연관 문자)를 일괄 이동
-                  (foreach o move-objs
-                    (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list dx dy 0.0))))
+                  ;; 2차 다각형 간섭 검출 및 오프셋 보정 (방안 B)
+                  (if (and out-pts (>= (length out-pts) 3))
+                    (progn
+                      (setq temp-poly (mapcar '(lambda (p) (list (+ (car p) dx) (+ (cadr p) dy))) out-pts))
+                      (setq max-over-r 0.0 max-over-l 0.0 min-clear-r 1e9 min-clear-l 1e9)
+                      (foreach pt in-pts
+                        (setq x-rng (MBBG:GetXRangeAtY temp-poly (cadr pt)))
+                        (if x-rng
+                          (progn
+                            (setq xl (car x-rng) xr (cadr x-rng))
+                            (setq cl (- (car pt) xl) cr (- xr (car pt)))
+                            (if (< cr 0.0) (setq max-over-r (max max-over-r (- cr))))
+                            (if (< cl 0.0) (setq max-over-l (max max-over-l (- cl))))
+                            (setq min-clear-l (min min-clear-l cl)
+                                  min-clear-r (min min-clear-r cr))
+                          )
+                        )
+                      )
+                      ;; 침범량 자동 보정량 계산
+                      (if (or (> max-over-r 0.0) (> max-over-l 0.0))
+                        (if (> max-over-r max-over-l)
+                          (setq corr-x (+ max-over-r (/ (- min-clear-l max-over-r) 2.0)))
+                          (setq corr-x (- (+ max-over-l (/ (- min-clear-r max-over-l) 2.0))))
+                        )
+                        (setq corr-x (/ (- min-clear-l min-clear-r) 2.0))
+                      )
+                    )
+                    (setq corr-x 0.0)
                   )
 
-                  (princ (strcat "\n>> [MBBG 완료] 총 " (itoa (length move-objs)) "개 객체 균등 배치 완료!"))
-                  (princ (strcat "\n   - 외곽 좌우 균등 여백: " (rtos gap-x 2 1) " mm"))
-                  (princ (strcat "\n   - 외곽 상하 균등 여백: " (rtos gap-y 2 1) " mm"))
-                  (if (or (< gap-x 0.0) (< gap-y 0.0))
-                    (princ "\n   * [주의]: 내부 부품 크기가 외곽 틀보다 큽니다. 간섭을 확인하십시오.")
+                  (setq final-dx (+ dx corr-x)
+                        final-dy dy)
+
+                  ;; [핵심]: 내부 부품은 고정하고, 외곽 모형(틀) 객체들만 역이동!
+                  (foreach o move-out-objs
+                    (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list final-dx final-dy 0.0))))
                   )
+
+                  ;; 최종 간섭 여유 확인
+                  (if (and out-pts (>= (length out-pts) 3))
+                    (progn
+                      (setq temp-poly (mapcar '(lambda (p) (list (+ (car p) final-dx) (+ (cadr p) final-dy))) out-pts))
+                      (setq all-inside T final-min-clear 1e9)
+                      (foreach pt in-pts
+                        (setq x-rng (MBBG:GetXRangeAtY temp-poly (cadr pt)))
+                        (if x-rng
+                          (progn
+                            (setq cl (- (car pt) (car x-rng)) cr (- (cadr x-rng) (car pt)))
+                            (setq final-min-clear (min final-min-clear cl cr))
+                            (if (or (< cl 0.0) (< cr 0.0)) (setq all-inside nil))
+                          )
+                        )
+                      )
+                    )
+                  )
+
+                  (princ (strcat "
+>> [MBBG 완료] 외곽 모형 역이동 배치 성공!"))
+                  (princ (strcat "
+   - 외곽 모형 이동량: X = " (rtos final-dx 2 1) " mm, Y = " (rtos final-dy 2 1) " mm"))
+                  (if (and out-pts final-min-clear (< final-min-clear 1e8))
+                    (princ (strcat "
+   - 내부 최소 안전 여백(간섭 제로): " (rtos final-min-clear 2 1) " mm"))
+                  )
+                  (princ "
+   - 내부 부품 및 문자는 원래 위치에 안전하게 고정되었습니다.")
                 )
-                (princ "\n>> 오류: 내부 객체 중 기하 부품(폴리선/선/원 등)을 찾을 수 없습니다.")
+                (princ "
+>> 오류: 내부 객체 중 기하 부품을 측정할 수 없습니다.")
               )
             )
-            (princ "\n>> 선택 취소: 내부에 배치할 객체가 선택되지 않았습니다.")
+            (princ "
+>> 선택 취소: 내부에 배치할 객체가 선택되지 않았습니다.")
           )
         )
-        (princ "\n>> 오류: 외곽 기준 모형의 경계를 측정할 수 없습니다.")
+        (princ "
+>> 오류: 외곽 기준 모형의 경계를 측정할 수 없습니다.")
       )
     )
-    (princ "\n>> 선택 취소: 외곽 기준 모형이 선택되지 않았습니다.")
+    (princ "
+>> 선택 취소: 외곽 기준 모형이 선택되지 않았습니다.")
   )
 
-  ;; 메모리 해제
-  (setq ss-out nil ss-in nil move-objs nil)
+  ;; 메모리 자원 해제
+  (setq ss-out nil ss-in nil move-out-objs nil out-pts nil in-pts nil)
   (vla-EndUndoMark acDoc)
   (setvar 'CMDECHO 1)
   (princ)
 )
-;;; [END: CURRENT ACTIVE - v1.2 MODIFIED (2026-10-22 18:41:30)]
+;;; [END: CURRENT ACTIVE - v1.3 MODIFIED (2026-10-22 18:54:30)]]
 
 
 (defun c:MBBUI ( / dcl_file fp dcl_id action thk_val )
