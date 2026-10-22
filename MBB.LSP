@@ -1746,8 +1746,9 @@
           x1 (car p1)
           x2 (car p2)
           i  (1+ i))
-    (if (and (<= (min y1 y2) y) (<= y (max y1 y2)))
-      (if (equal y1 y2 1e-6)
+    ;; 부동소수점 오차 방어 1e-3 fuzz
+    (if (and (<= (- (min y1 y2) 1e-3) y) (<= y (+ (max y1 y2) 1e-3)))
+      (if (equal y1 y2 1e-4)
         (setq xs (cons x1 (cons x2 xs)))
         (progn
           (setq t-val (/ (- y y1) (- y2 y1)))
@@ -1791,7 +1792,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v1.4] 외곽 모형 이동 & 2D 최적 클리어런스 자동 배치")
+  (princ "\n[MBBG v1.5] 외곽 모형 이동 & 2D 수치해석 정밀 최적 배치")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 형상 객체 선택
@@ -1812,14 +1813,20 @@
                   out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
           )
         )
-        ;; 외곽 정점 좌표 추출
-        (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
-          (progn
-            (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
-            (while p2
-              (setq out-pts (cons (list (car p2) (cadr p2)) out-pts))
-              (setq p2 (cddr p2))
-            )
+        ;; 외곽 정점 좌표 추출 (vlax-get 우선, vla-get-Coordinates 보조 이중 방어)
+        (setq p1 nil)
+        (if (vlax-property-available-p obj 'Coordinates)
+          (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
+        )
+        (if (or (vl-catch-all-error-p p1) (null p1))
+          (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
+            (setq p1 (vlax-safearray->list (vlax-variant-value p2)))
+          )
+        )
+        (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
+          (while p1
+            (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+            (setq p1 (cddr p1))
           )
         )
       )
@@ -1863,15 +1870,15 @@
                   (setq in-cx (/ (+ (car in-min) (car in-max)) 2.0)
                         in-cy (/ (+ (cadr in-min) (cadr in-max)) 2.0))
 
-                  ;; ;;; [START: CURRENT ACTIVE - v1.4 MODIFIED (2026-10-22 19:02:00)]
-                  ;; 2D 최적 클리어런스 탐색 알고리즘 (Y축 높이 보정 연동)
+                  ;; ;;; [START: CURRENT ACTIVE - v1.5 MODIFIED (2026-10-22 19:12:00)]
+                  ;; 2D 최적 클리어런스 정밀 수치해석 알고리즘 (120단계 스캔 & 이중 안전 방어)
                   (if (and out-pts (>= (length out-pts) 3))
                     (progn
                       (setq dy-min (- (cadr in-max) (cadr out-max))
                             dy-max (- (cadr in-min) (cadr out-min)))
                       (if (<= dy-min dy-max)
-                        (setq num-steps 60
-                              step-dy (/ (- dy-max dy-min) 60.0))
+                        (setq num-steps 120
+                              step-dy (/ (- dy-max dy-min) 120.0))
                         (setq num-steps 0
                               step-dy 0.0
                               dy-min (- in-cy out-cy))
@@ -1925,7 +1932,7 @@
                             best-clear nil)
                     )
                   )
-                  ;; ;;; [END: CURRENT ACTIVE - v1.4 MODIFIED]
+                  ;; ;;; [END: CURRENT ACTIVE - v1.5 MODIFIED]
 
                   ;; [핵심]: 내부 부품은 불변 고정, 외곽 형상(틀) 객체들만 이동!
                   (foreach o move-out-objs
