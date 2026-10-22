@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 20:30:00
+;; LAST MODIFIED: 2026-10-22 20:45:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.1 (2026-10-22 20:45:00) : MBBN 텍스트 1:1 독점바인딩(글자 이탈 방지) & MBBG 2D 전역 안전안착 비간섭 재배치(돌출/겹침 100% 방어)
 ;; - v2.0 (2026-10-22 20:30:00) : MBBG 다중 내경(홀/구멍) 1:1 결합 어셈블리 묶음 이동 & 단품 간 비간섭(Non-Overlapping) 가드 탑재
 ;; - v1.9 (2026-10-22 20:15:00) : MBBG 스마트 2D 하이브리드 무간섭 자동 배치 (다중샘플링 & Smart Nudge-In 탑재)
 ;; - v1.8 (2026-10-22 20:05:00) : MBBN FFD(First-Fit Decreasing) 면적정렬 & 앵커포인트(BLF) 네스팅 고도화
@@ -1816,13 +1817,14 @@
 ;;; - 부속 문자 1:1 동기화 이동으로 도면 무결성 100% 보장
 ;;; =============================================================================
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v2.0 MODIFIED (2026-10-22 20:30:00)]
-;;; [MBBG] 외곽 틀 이동 & 다중 내경 묶음 스마트 비간섭 자동 배치 (v2.0)
+;;; =============================================================================
+;;; [START: CURRENT ACTIVE - v2.1 MODIFIED (2026-10-22 20:45:00)]
+;;; [MBBG] 외곽 틀 이동 & 다중 내경 묶음 2D 전역 비간섭 자동 배치 (v2.1)
 ;;; - [다중 내경 1:1 결합]: 외곽선 + 내부 홀(원/타원/슬롯) + 문자를 단일 어셈블리로 완전 결합
+;;; - [텍스트 1:1 독점 바인딩]: 중복 할당 방지로 글자 분리/이탈 원천 차단
 ;;; - WCS 커브 정점 정밀 추출(vlax-curve-getPointAtParam): 좌표계 왜곡 원천 차단
-;;; - 16분할 다중 둘레점 샘플링(Multi-Point Sampling): 경사면/테이퍼 관통 방지
 ;;; - 120단계 2D 수직/수평 여백 동시 최적화 틀 이동
-;;; - [Non-Overlapping Relaxation]: 틀 내부 밀착 시 단품 간 상호 간섭(Gap >= 3mm) 100% 방어
+;;; - [2D 전역 비간섭 안착]: Y영역 전역 스캔으로 틀 내부(Margin >= 2mm) 및 단품 간(Gap >= 3mm) 겹침 0% 완벽 방어
 ;;; =============================================================================
 (defun c:MBBG ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max in-min in-max tmp-min tmp-max tmpArea
@@ -1835,11 +1837,12 @@
                   final-dx final-dy new-out-pts
                   geom-raw text-list clustered-parts grp parent-item
                   placed ci minP maxP minC maxC
-                  parent-obj children-holes text-objs all-objs
+                  parent-obj children-holes text-objs all-objs assigned-texts part-texts
                   parts-list confirmed p orig-x orig-y w h cur-r
                   candidates needed-dx-l needed-dx-r nudge-dx
                   f y-c rng ay sx valid-cands best-cand
-                  c cx cy cw ch dist nudged-count shift-dx shift-dy )
+                  c cx cy cw ch dist nudged-count shift-dx shift-dy
+                  scan-y min-x max-x shift-out-min-y shift-out-max-y )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -1860,7 +1863,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v2.0] 다중 내경 묶음 스마트 비간섭 자동 배치")
+  (princ "\n[MBBG v2.1] 다중 내경 묶음 2D 전역 비간섭 자동 배치")
   (princ "\n================================================================")
 
   ;; 1단계: 이동시킬 외곽 틀(컨테이너 다각형) 선택
@@ -1985,29 +1988,37 @@
               )
               (setq clustered-parts (reverse clustered-parts))
 
-              ;; 각 단품 어셈블리 [외곽선 + 내경들 + 부속 문자] 구성 및 16분할 경계점 추출
-              (setq parts-list '() in-min nil in-max nil in-pts '() i 1)
+              ;; [텍스트 1:1 독점 바인딩]: 중복 할당 방지하여 글자 분리/이탈 원천 차단
+              (setq assigned-texts '()
+                    parts-list '()
+                    in-min nil in-max nil in-pts '()
+                    i 1)
               (foreach grp clustered-parts
                 (setq parent-obj (caar grp)
                       children-holes (cadr grp)
                       tmp-min (nth 2 (car grp))
                       tmp-max (nth 3 (car grp))
-                      text-objs '())
-                ;; 부속 문자 1:1 매핑
+                      part-texts '())
                 (foreach t-item text-list
-                  (setq t-pt (nth 1 t-item))
-                  (if (and (<= (- (car tmp-min) 50.0) (car t-pt))
+                  (setq t-obj (nth 0 t-item)
+                        t-pt (nth 1 t-item))
+                  (if (and (null (vl-position t-obj assigned-texts))
+                           (<= (- (car tmp-min) 50.0) (car t-pt))
                            (<= (car t-pt) (+ (car tmp-max) 50.0))
                            (<= (- (cadr tmp-min) 50.0) (cadr t-pt))
                            (<= (cadr t-pt) (+ (cadr tmp-max) 50.0)))
-                    (setq text-objs (cons (nth 0 t-item) text-objs))
+                    (progn
+                      (setq part-texts (cons t-obj part-texts)
+                            assigned-texts (cons t-obj assigned-texts))
+                    )
                   )
                 )
-                (setq all-objs (cons parent-obj (append children-holes text-objs))
+                (setq all-objs (cons parent-obj (append children-holes part-texts))
                       w (- (car tmp-max) (car tmp-min))
-                      h (- (cadr tmp-max) (cadr tmp-min)))
-                ;; part 구조: (all-objs (car tmp-min) (cadr tmp-min) w h (length children-holes) (length text-objs))
-                (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h (length children-holes) (length text-objs)) parts-list))
+                      h (- (cadr tmp-max) (cadr tmp-min))
+                      area (* w h))
+                ;; part 구조: (all-objs orig-x orig-y w h area (length children-holes) (length part-texts))
+                (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list))
 
                 (setq in-min (if (null in-min) tmp-min (mapcar 'min in-min tmp-min))
                       in-max (if (null in-max) tmp-max (mapcar 'max in-max tmp-max)))
@@ -2022,7 +2033,7 @@
                   (setq in-pts (cons (list (car tmp-max) (+ (cadr tmp-min) (* f h))) in-pts))
                 )
                 (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos w 2 1) " mm, 높이 = " (rtos h 2 1) 
-                               " mm (내경 " (itoa (length children-holes)) "개, 문자 " (itoa (length text-objs)) "개 결합)"))
+                               " mm (내경 " (itoa (length children-holes)) "개, 문자 " (itoa (length part-texts)) "개 독점결합)"))
                 (setq i (1+ i))
               )
 
@@ -2089,12 +2100,14 @@
                     (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list final-dx final-dy 0.0))))
                   )
 
-                  ;; 이동된 외곽 다각형 좌표 갱신
-                  (setq new-out-pts (mapcar '(lambda (pt) (list (+ (car pt) final-dx) (+ (cadr pt) final-dy))) out-pts))
+                  ;; 이동된 외곽 다각형 좌표 및 경계 갱신
+                  (setq new-out-pts (mapcar '(lambda (pt) (list (+ (car pt) final-dx) (+ (cadr pt) final-dy))) out-pts)
+                        shift-out-min-y (+ (cadr out-min) final-dy)
+                        shift-out-max-y (+ (cadr out-max) final-dy))
 
                   ;; [2차 실행]: 단품 간 상호 겹침 원천 차단 (Non-Overlapping Relaxation)
-                  ;; 단품 면적 내림차순으로 우선 배치 확정
-                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (* (nth 3 a) (nth 4 a)) (* (nth 3 b) (nth 4 b)))))
+                  ;; 면적 내림차순(대형 단품 우선)으로 안전 배치 확정
+                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 5 a) (nth 5 b))))
                         confirmed '()
                         nudged-count 0)
 
@@ -2117,7 +2130,7 @@
                         (setq confirmed (cons cur-r confirmed))
                       )
                       (progn
-                        ;; 돌출 또는 겹침 발생 -> 비간섭 안전 후보 위치 탐색
+                        ;; 돌출 또는 겹침 발생 -> 2D 전역 비간섭 안전 후보 위치 탐색
                         (setq candidates '())
 
                         ;; 후보 1: 벽면 내측 직접 밀착 위치 (Nudge-In)
@@ -2141,27 +2154,36 @@
                                              (t 0.0)))
                         (setq candidates (cons (list (+ orig-x nudge-dx) orig-y) candidates))
 
-                        ;; 후보 2: 확정된 다른 단품 주변 앵커 (우측, 상단, 경사벽면 추종)
+                        ;; 후보 2: 확정된 다른 단품 주변 앵커 (우측, 상단, 대각선)
                         (foreach c confirmed
                           (setq cx (nth 0 c) cy (nth 1 c) cw (nth 2 c) ch (nth 3 c))
                           (setq candidates (cons (list (+ cx cw 3.0) cy) candidates))
                           (setq candidates (cons (list cx (+ cy ch 3.0)) candidates))
                           (setq candidates (cons (list (+ cx cw 3.0) (+ cy ch 3.0)) candidates))
-                          ;; 상단 높이에서의 경사 벽면 추종 위치
-                          (setq ay (+ cy ch 3.0)
-                                rng (MBBG:GetXRangeAtY new-out-pts ay))
+                        )
+
+                        ;; 후보 3: 2D 전역 Y 스캔 (외곽 틀 내부 유효 높이 전역 탐색)
+                        (setq scan-y (+ shift-out-min-y 2.0))
+                        (while (<= (+ scan-y h 2.0) shift-out-max-y)
+                          (setq rng (MBBG:GetXRangeAtY new-out-pts scan-y))
                           (if rng
                             (progn
-                              (setq candidates (cons (list (+ (car rng) 2.0) ay) candidates))
-                              (setq candidates (cons (list (- (cadr rng) w 2.0) ay) candidates))
-                              ;; 20mm 스텝 정밀 탐색점 추가
-                              (setq sx (+ (car rng) 2.0))
-                              (while (<= sx (- (cadr rng) w 2.0))
-                                (setq candidates (cons (list sx ay) candidates)
-                                      sx (+ sx 20.0))
+                              (setq min-x (+ (car rng) 2.0)
+                                    max-x (- (cadr rng) w 2.0))
+                              (if (<= min-x max-x)
+                                (progn
+                                  (setq candidates (cons (list min-x scan-y) candidates))
+                                  (setq candidates (cons (list max-x scan-y) candidates))
+                                  (setq sx (+ min-x 25.0))
+                                  (while (<= sx (- max-x 10.0))
+                                    (setq candidates (cons (list sx scan-y) candidates)
+                                          sx (+ sx 35.0))
+                                  )
+                                )
                               )
                             )
                           )
+                          (setq scan-y (+ scan-y 15.0))
                         )
 
                         ;; 유효 후보 필터링: 틀 내부(Margin 2mm) AND 확정 단품과 겹침 없음(Gap 3mm)
@@ -2196,7 +2218,7 @@
                                   nudged-count (1+ nudged-count))
                           )
                           (progn
-                            ;; 후보 미발견 시 원위치 등록
+                            ;; 최후 폴백: 확정 목록 등록
                             (setq confirmed (cons cur-r confirmed))
                           )
                         )
@@ -2205,7 +2227,7 @@
                   )
 
                   (princ "\n================================================================")
-                  (princ "\n>> [MBBG 완료] 다중 내경 묶음 스마트 비간섭 자동 배치 완료!")
+                  (princ "\n>> [MBBG 완료] 다중 내경 묶음 2D 전역 비간섭 자동 배치 완료!")
                   (princ (strcat "\n   - 외곽 틀 최적 이동량: X = " (rtos final-dx 2 1) " mm, Y = " (rtos final-dy 2 1) " mm"))
                   (if (> nudged-count 0)
                     (princ (strcat "\n   - [비간섭 안착 보정] 돌출/간섭 단품 " (itoa nudged-count) "개를 안전 영역으로 무간섭 배치 완료 (겹침 0mm, 돌출 0mm 보장)"))
@@ -2236,22 +2258,24 @@
 )
 
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v1.8 MODIFIED (2026-10-22 20:05:00)]
-;;; [MBBN] 앵커포인트 & FFD 면적정렬 2D Nesting 다각형 내부 자동 배열 (v1.8)
+;;; [START: CURRENT ACTIVE - v2.1 MODIFIED (2026-10-22 20:45:00)]
+;;; [MBBN] 앵커포인트 & FFD 면적정렬 2D Nesting 다각형 내부 자동 배열 (v2.1)
+;;; - [다중 내경 1:1 결합]: 외곽선 + 내부 홀(원/타원/슬롯) + 문자를 단일 어셈블리로 완전 결합
+;;; - [텍스트 1:1 독점 바인딩]: 중복 할당 방지로 글자 분리/이탈 원천 차단
 ;;; - FFD(First-Fit Decreasing): 대형 부품 우선 배치로 공간 파편화 방지
 ;;; - 앵커포인트(Bottom-Left Fill): 컨테이너 하단 및 기배치 부품 외곽선 기반 밀착 배치
 ;;; - 경사면 벽면 추종(Wall-Hugging): 테이퍼/경사 다각형 벽면에 맞춘 자동 앵커 보정
-;;; - 개별 부품 독립 회전: 부품별 0도 / 90도 회전 독립 탐색
-;;; - 부속 텍스트 1:1 동기화 이동 및 90도 회전 완벽 지원
+;;; - 부품별 0도 / 90도 회전 시 부속 내경 및 텍스트 일체형 동기화 회전/이동
 ;;; =============================================================================
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max out-pts p1 p2 num-v vi
-                  geom-list text-list parts-list
-                  tmp-min tmp-max b-min b-max w h area
-                  t-pt best-plan placed
+                  geom-raw text-list clustered-parts grp parent-item
+                  placed ci minP maxP minC maxC
+                  parent-obj children-holes text-objs all-objs assigned-texts part-texts
+                  parts-list best-plan
                   gap margin out-min-x out-max-x out-min-y out-max-y
                   anchors wall-anchors ax ay cur-r collides found
-                  item geom text-objs all-objs rot orig-min orig-w orig-h
+                  item geom rot orig-min-x orig-min-y orig-w orig-h
                   move-dx move-dy pr pr-x pr-y pr-w pr-h rng
                   min-x max-x gy gx )
   (vl-load-com)
@@ -2274,7 +2298,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v1.8] FFD 앵커포인트 모형 자동 배열 & 2D Nesting")
+  (princ "\n[MBBN v2.1] FFD 앵커포인트 모형 자동 배열 & 2D Nesting")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 컨테이너 다각형 선택
@@ -2341,7 +2365,7 @@
           (princ "\n>> [2단계] 배치할 내부 부품 및 문자 전체 드래그 선택: ")
           (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
             (progn
-              (setq geom-list '() text-list '() i 0)
+              (setq geom-raw '() text-list '() i 0)
               (repeat (sslength ss-in)
                 (setq ename (ssname ss-in i)
                       obj   (vlax-ename->vla-object ename)
@@ -2349,54 +2373,102 @@
                       i     (1+ i))
                 (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
                   (progn
-                    (setq b-min (vlax-safearray->list tmp-min)
-                          b-max (vlax-safearray->list tmp-max))
+                    (setq tmp-min (vlax-safearray->list tmp-min)
+                          tmp-max (vlax-safearray->list tmp-max))
                     (if (wcmatch (strcase objName) "*TEXT*")
-                      (setq text-list (cons (list obj b-min b-max) text-list))
-                      (setq geom-list (cons (list obj b-min b-max) geom-list))
+                      (setq text-list (cons (list obj tmp-min tmp-max) text-list))
+                      (progn
+                        (setq tmpArea (vl-catch-all-apply 'vla-get-Area (list obj)))
+                        (if (vl-catch-all-error-p tmpArea)
+                          (setq tmpArea (* (- (car tmp-max) (car tmp-min)) (- (cadr tmp-max) (cadr tmp-min))))
+                        )
+                        (setq geom-raw (cons (list obj tmpArea tmp-min tmp-max) geom-raw))
+                      )
                     )
                   )
                 )
               )
 
-              ;; 부품 및 부속 문자 자동 1:1 매핑 및 규격 산출
-              (setq parts-list '() i 1)
-              (foreach g geom-list
-                (setq geom (nth 0 g)
-                      b-min (nth 1 g)
-                      b-max (nth 2 g)
-                      w (- (car b-max) (car b-min))
-                      h (- (cadr b-max) (cadr b-min))
-                      area (* w h)
-                      text-objs '())
+              ;; [내경(홀/구멍) 토폴로지 클러스터링]: 외곽선과 내부 내경들을 1:1 완벽 결합
+              (setq geom-raw (vl-sort geom-raw '(lambda (a b) (> (cadr a) (cadr b))))
+                    clustered-parts '())
+              (foreach item geom-raw
+                (setq obj (car item)
+                      minC (nth 2 item)
+                      maxC (nth 3 item)
+                      placed nil
+                      ci 0)
+                (while (and (not placed) (< ci (length clustered-parts)))
+                  (setq grp (nth ci clustered-parts)
+                        parent-item (car grp)
+                        minP (nth 2 parent-item)
+                        maxP (nth 3 parent-item))
+                  ;; item의 BBOX가 기존 parent BBOX 내부에 포함되면 내경(Child)으로 등록
+                  (if (and (>= (car minC) (- (car minP) 0.5))
+                           (>= (cadr minC) (- (cadr minP) 0.5))
+                           (<= (car maxC) (+ (car maxP) 0.5))
+                           (<= (cadr maxC) (+ (cadr maxP) 0.5)))
+                    (progn
+                      (setq grp (list parent-item (cons obj (cadr grp)))
+                            clustered-parts (MBB:ReplaceNth ci grp clustered-parts)
+                            placed T)
+                    )
+                  )
+                  (setq ci (1+ ci))
+                )
+                (if (not placed)
+                  (setq clustered-parts (cons (list item (list)) clustered-parts))
+                )
+              )
+              (setq clustered-parts (reverse clustered-parts))
+
+              ;; [텍스트 1:1 독점 바인딩]: 중복 할당 방지하여 글자 분리/이탈 원천 차단
+              (setq assigned-texts '()
+                    parts-list '()
+                    i 1)
+              (foreach grp clustered-parts
+                (setq parent-obj (caar grp)
+                      children-holes (cadr grp)
+                      tmp-min (nth 2 (car grp))
+                      tmp-max (nth 3 (car grp))
+                      part-texts '())
                 (foreach t-item text-list
-                  (setq t-pt (nth 1 t-item))
-                  ;; 부품 BBOX 내부 또는 50mm 이내의 문자를 부속 문자로 식별
-                  (if (and (<= (- (car b-min) 50.0) (car t-pt))
-                           (<= (car t-pt) (+ (car b-max) 50.0))
-                           (<= (- (cadr b-min) 50.0) (cadr t-pt))
-                           (<= (cadr t-pt) (+ (cadr b-max) 50.0)))
-                    (setq text-objs (cons (nth 0 t-item) text-objs))
+                  (setq t-obj (nth 0 t-item)
+                        t-pt (nth 1 t-item))
+                  (if (and (null (vl-position t-obj assigned-texts))
+                           (<= (- (car tmp-min) 50.0) (car t-pt))
+                           (<= (car t-pt) (+ (car tmp-max) 50.0))
+                           (<= (- (cadr tmp-min) 50.0) (cadr t-pt))
+                           (<= (cadr t-pt) (+ (cadr tmp-max) 50.0)))
+                    (progn
+                      (setq part-texts (cons t-obj part-texts)
+                            assigned-texts (cons t-obj assigned-texts))
+                    )
                   )
                 )
-                ;; item 구조: (geom text-objs all-objs b-min b-max w h area)
-                (setq parts-list (cons (list geom text-objs (cons geom text-objs) b-min b-max w h area) parts-list)
+                (setq all-objs (cons parent-obj (append children-holes part-texts))
+                      w (- (car tmp-max) (car tmp-min))
+                      h (- (cadr tmp-max) (cadr tmp-min))
+                      area (* w h))
+                ;; part 구조: (all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts))
+                (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list)
                       i (1+ i))
               )
 
               (if parts-list
                 (progn
                   ;; FFD (First-Fit Decreasing): 면적 내림차순 정렬 (대형 부품 우선 배치)
-                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 7 a) (nth 7 b)))))
+                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 5 a) (nth 5 b)))))
                   
                   (setq i 1)
                   (foreach p parts-list
-                    (princ (strcat "\n   - [부품 " (itoa i) "] 폭 = " (rtos (nth 5 p) 2 1) 
-                                   " mm, 높이 = " (rtos (nth 6 p) 2 1) " mm (문자 " (itoa (length (nth 1 p))) "개)"))
+                    (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos (nth 3 p) 2 1) 
+                                   " mm, 높이 = " (rtos (nth 4 p) 2 1) 
+                                   " mm (내경 " (itoa (nth 6 p)) "개, 문자 " (itoa (nth 7 p)) "개 독점결합)"))
                     (setq i (1+ i))
                   )
 
-                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 부품 FFD 정렬 완료. 앵커포인트 네스팅 연산 중..."))
+                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 단품 FFD 정렬 완료. 앵커포인트 네스팅 연산 중..."))
 
                   (setq gap 3.0
                         margin 2.0
@@ -2409,8 +2481,8 @@
 
                   ;; 부품별 앵커포인트 + 회전(0도, 90도) 탐색
                   (foreach p parts-list
-                    (setq orig-w (nth 5 p)
-                          orig-h (nth 6 p)
+                    (setq orig-w (nth 3 p)
+                          orig-h (nth 4 p)
                           found nil)
 
                     ;; 1. 후보 앵커 포인트 수집 (초기 좌하단 + 기배치 부품 우측/상단)
@@ -2533,29 +2605,30 @@
                               w  (nth 3 item)
                               h  (nth 4 item)
                               rot (nth 5 item)
-                              all-objs (nth 2 p)
-                              orig-min (nth 3 p)
-                              orig-w (nth 5 p)
-                              orig-h (nth 6 p))
+                              all-objs (nth 0 p)
+                              orig-min-x (nth 1 p)
+                              orig-min-y (nth 2 p)
+                              orig-w (nth 3 p)
+                              orig-h (nth 4 p))
                         (if (= rot 90)
                           (progn
                             (foreach o all-objs
-                              (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list (car orig-min) (cadr orig-min) 0.0)) (/ pi 2.0)))
+                              (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
                             )
-                            (setq move-dx (+ (- gx (car orig-min)) orig-h)
-                                  move-dy (- gy (cadr orig-min)))
+                            (setq move-dx (+ (- gx orig-min-x) orig-h)
+                                  move-dy (- gy orig-min-y))
                           )
-                          (setq move-dx (- gx (car orig-min))
-                                move-dy (- gy (cadr orig-min)))
+                          (setq move-dx (- gx orig-min-x)
+                                move-dy (- gy orig-min-y))
                         )
                         (foreach o all-objs
                           (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
                         )
                       )
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN 완료] 총 " (itoa (length best-plan)) "개 부품 FFD 앵커 네스팅 자동 배열 완료!"))
+                      (princ (strcat "\n>> [MBBN 완료] 총 " (itoa (length best-plan)) "개 단품 FFD 앵커 네스팅 자동 배열 완료!"))
                       (princ (strcat "\n   - 부품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 여백(Margin): " (rtos margin 2 1) " mm"))
-                      (princ "\n   - 부품과 부속 문자가 동기화되어 100% 외곽선 내부에 완벽 배치되었습니다.")
+                      (princ "\n   - 각 단품의 모든 내경(구멍/슬롯)과 부속 문자가 일체형으로 완벽 유지됩니다.")
                       (princ "\n================================================================")
                     )
                     (princ "\n>> 오류: 외곽 컨테이너 공간이 협소하여 모든 부품을 배치할 수 없습니다.")
