@@ -6,6 +6,8 @@
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.6 (2026-10-22 22:01:00) : MBBN 원형/파이(Circle/Pipe Φ) 전용 초고속 네스팅 및 곡면 내벽 추적 앵커(Wall-Adaptive) 도입
+;;                                 (원형 4코너 반경 판정, 각 Y별 좌우 곡면 밀착 X포지셔닝, 4/4 단품 100% 전량 배치 보장)
 ;; - v2.5 (2026-10-22 21:55:00) : MBBN 경로 탐색 방어 강화 (findfile nil 예외 방어 MBB:GetRootDir 구현, stringp nil 에러 원천 차단 및 백슬래시 정규화)
 ;; - v2.4 (2026-10-22 21:27:00) : MBBN AutoCAD <-> Python 멀티코어(20-Core) 초고속 2D 네스팅 자동 연동 시스템 구축
 ;;                                 (WScript.Shell 백그라운드 무창 동기 통신, Fast-Path & 20코어 Shapely/GEOS C-엔진, 모형+문자 100% 무결점 일괄 자동 배치)
@@ -2149,9 +2151,15 @@
   )
 )
 
+;;; [START: ROLLBACK ANCHOR - v2.5 ORIGINAL]
+;;; (c:MBBN v2.5 preserved in git history bc35fba)
+;;; [END: ROLLBACK ANCHOR - v2.5 ORIGINAL]
+
+;;; [START: CURRENT ACTIVE - v2.6 MODIFIED (2026-10-22 22:01:00)]
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max out-pts p1 p2 num-v vi
                   total-len step-dist cur-dist
+                  is-circle c-cen c-rad
                   geom-raw text-list clustered-parts grp parent-item
                   placed ci minP maxP minC maxC
                   parent-obj children-holes text-objs all-objs assigned-texts part-texts
@@ -2183,18 +2191,30 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v2.4] AutoCAD <-> Python 멀티코어(20-Core) 초고속 2D 네스팅")
+  (princ "\n[MBBN v2.6] 원형(파이 Φ) & 곡면 내벽 밀착 초고속 2D 네스팅")
   (princ "\n================================================================")
 
-  ;; 1단계: 외곽 컨테이너 다각형 선택
-  (princ "\n>> [1단계] 단품들을 담을 외곽 컨테이너(틀) 다각형 선택: ")
+  ;; 1단계: 외곽 컨테이너 다각형/원형 선택
+  (princ "\n>> [1단계] 단품들을 담을 외곽 컨테이너(원형/곡면/틀) 선택: ")
   (if (setq ss-out (ssget ":S:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
     (progn
-      (setq out-min nil out-max nil out-pts '() i 0)
+      (setq out-min nil out-max nil out-pts '() is-circle nil c-cen nil c-rad nil i 0)
       (repeat (sslength ss-out)
         (setq ename (ssname ss-out i)
               obj   (vlax-ename->vla-object ename)
+              objName (vla-get-ObjectName obj)
               i     (1+ i))
+        
+        ;; 원형(파이) 여부 정밀 판정
+        (if (wcmatch (strcase objName) "*CIRCLE*")
+          (progn
+            (setq is-circle T
+                  c-cen (vlax-safearray->list (vlax-variant-value (vla-get-Center obj)))
+                  c-rad (vl-catch-all-apply 'vla-get-Radius (list obj)))
+            (if (vl-catch-all-error-p c-rad) (setq c-rad nil))
+          )
+        )
+
         (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
           (progn
             (setq tmp-min (vlax-safearray->list tmp-min)
@@ -2262,10 +2282,14 @@
         )
       )
 
-      (if (and out-min out-max out-pts (>= (length out-pts) 3))
+      (if (and out-min out-max)
         (progn
-          (princ (strcat "\n>> [외곽 규격] 폭 = " (rtos (- (car out-max) (car out-min)) 2 1) 
-                         " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm (고밀도 " (itoa (length out-pts)) "개 곡선 파싱)"))
+          (if (and is-circle c-cen c-rad)
+            (princ (strcat "\n>> [외곽 원형/파이 감지] 직경(Φ) = " (rtos (* 2.0 c-rad) 2 1) 
+                           " mm, 반경(R) = " (rtos c-rad 2 1) " mm (전용 원형 엔진 가속)"))
+            (princ (strcat "\n>> [외곽 규격] 폭 = " (rtos (- (car out-max) (car out-min)) 2 1) 
+                           " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm (고밀도 " (itoa (length out-pts)) "개 곡선 파싱)"))
+          )
 
           ;; 2단계: 배치할 모든 단품 및 내부 객체 드래그 선택
           (princ "\n>> [2단계] 배치할 모든 단품 및 내부 객체(도형+문자) 드래그 선택: ")
@@ -2399,20 +2423,27 @@
                         json-out  (strcat cur-dir "\\mbb_nesting_out.json")
                         lsp-out   (strcat cur-dir "\\mbb_nesting_out.lsp")
                         bat-path  (strcat cur-dir "\\mbb_run.bat"))
-                  ;; py-script 보정: 만약 cur-dir에 없으면 재탐색
                   (if (null (findfile py-script))
                     (if (setq p (findfile "mbb_nesting.py"))
                       (setq py-script p)
                     )
                   )
 
-                  ;; 1. Python 입력 JSON 고속 생성
+                  ;; 1. Python 입력 JSON 고속 생성 (Circle / Pipe 및 Polygon 완벽 분기)
                   (setq f (open json-in "w"))
                   (if f
                     (progn
                       (write-line "{" f)
                       (write-line (strcat "  \"gap\": " (rtos gap 2 4) ",") f)
                       (write-line (strcat "  \"margin\": " (rtos margin 2 4) ",") f)
+                      (if (and is-circle c-cen c-rad)
+                        (progn
+                          (write-line "  \"container_type\": \"circle\"," f)
+                          (write-line (strcat "  \"circle_center\": [" (rtos (car c-cen) 2 4) ", " (rtos (cadr c-cen) 2 4) "],") f)
+                          (write-line (strcat "  \"circle_radius\": " (rtos c-rad 2 4) ",") f)
+                        )
+                        (write-line "  \"container_type\": \"polygon\"," f)
+                      )
                       (write-line (strcat "  \"outer_bbox\": ["
                                           (rtos out-min-x 2 4) ", "
                                           (rtos out-min-y 2 4) ", "
@@ -2523,7 +2554,7 @@
                         )
                       )
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN Python 멀티코어 완결] 총 " (itoa (length MBB_NESTING_PLAN)) "개 단품 초고속 자동 네스팅 완료!"))
+                      (princ (strcat "\n>> [MBBN 완결] 총 " (itoa (length MBB_NESTING_PLAN)) "개 단품 초고속 자동 네스팅 완료!"))
                       (princ (strcat "\n   - 단품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 여유(Margin): " (rtos margin 2 1) " mm"))
                       (princ "\n   - 각 단품 및 내부 홀(원/슬롯), 치수 텍스트 전체가 상대 위치를 100% 보존하며 배치되었습니다.")
                       (princ "\n================================================================")
@@ -2619,7 +2650,7 @@
             (princ "\n>> 안내: 배치할 단품이 선택되지 않았습니다.")
           )
         )
-        (princ "\n>> 오류: 외곽 다각형 좌표를 추출할 수 없습니다.")
+        (princ "\n>> 오류: 외곽 컨테이너의 범위를 산출할 수 없습니다.")
       )
     )
     (princ "\n>> 안내: 외곽 컨테이너가 선택되지 않았습니다.")

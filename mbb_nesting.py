@@ -3,8 +3,8 @@
 =============================================================================
 [MBBN Ultra-Fast 2D Nesting Multi-Core Engine]
 Program: MBB Nesting Optimizer (Python 3.14 Multi-Core / Shapely Engine)
-Version: v2.4 (2026-10-22 21:27:00)
-Architecture: Hybrid (Direct Fast Path + 20-Core Multiprocessing BLF Anchor)
+Version: v2.6 (2026-10-22 22:01:00)
+Architecture: Wall-Adaptive Curved Boundary Anchoring + Circle/Pipe Engine
 =============================================================================
 """
 
@@ -36,29 +36,28 @@ def is_point_in_poly(x, y, poly_pts):
                         xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
                     if p1x == p2x or x <= xinters:
                         inside = not inside
-        p1x, p2x = p2x, p2y
+        p1x, p1y = p2x, p2y
     return inside
 
-def is_box_inside_poly(gx, gy, w, h, poly_pts, margin=0.0, prep_poly=None):
-    """Check if rectangle [gx, gy, gx+w, gy+h] with margin is completely inside poly"""
-    x1, y1 = gx - margin, gy - margin
-    x2, y2 = gx + w + margin, gy + h + margin
-
-    if HAS_SHAPELY and prep_poly is not None:
-        b = box(x1, y1, x2, y2)
-        return prep_poly.contains(b)
-
-    # Fallback sampling
-    test_pts = [
-        (x1, y1), (x2, y1), (x2, y2), (x1, y2),
-        ((x1+x2)*0.5, y1), ((x1+x2)*0.5, y2),
-        (x1, (y1+y2)*0.5), (x2, (y1+y2)*0.5),
-        ((x1+x2)*0.5, (y1+y2)*0.5)
-    ]
-    for px, py in test_pts:
-        if not is_point_in_poly(px, py, poly_pts):
-            return False
-    return True
+def get_poly_x_range(poly, y):
+    """Find left and right x-boundaries of polygon at height y"""
+    xs = []
+    n = len(poly)
+    for i in range(n):
+        p1 = poly[i]
+        p2 = poly[(i + 1) % n]
+        x1, y1 = p1
+        x2, y2 = p2
+        if min(y1, y2) - 1e-4 <= y <= max(y1, y2) + 1e-4:
+            if abs(y2 - y1) < 1e-5:
+                xs.extend([x1, x2])
+            else:
+                t = (y - y1) / (y2 - y1)
+                t = max(0.0, min(1.0, t))
+                xs.append(x1 + t * (x2 - x1))
+    if len(xs) >= 2:
+        return (min(xs), max(xs))
+    return None
 
 def rects_overlap(r1, r2, gap=0.0):
     """Check if two rectangles overlap with gap: r = (x, y, w, h)"""
@@ -71,66 +70,120 @@ def rects_overlap(r1, r2, gap=0.0):
 
 def solve_nesting_strategy(args):
     """
-    Evaluates a specific sorting and anchor placement strategy.
-    Can be run in parallel or sequentially.
+    Evaluates a specific sorting, alignment, and anchor placement strategy.
+    Supports Polygon containers and dedicated Circle/Pipe containers.
     """
-    strategy_id, parts_data, outer_pts, outer_bbox, gap, margin = args
+    strategy_id, parts_data, outer_data, gap, margin = args
 
-    min_ox, min_oy, max_ox, max_oy = outer_bbox
+    is_circle = (outer_data.get('container_type') == 'circle')
+    if is_circle:
+        cx, cy = outer_data['circle_center']
+        R = float(outer_data['circle_radius'])
+        min_ox, min_oy = cx - R, cy - R
+        max_ox, max_oy = cx + R, cy + R
+        prep_poly = None
 
-    prep_poly = None
-    if HAS_SHAPELY:
-        poly = Polygon(outer_pts)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-        prep_poly = prep(poly)
+        def x_range_fn(y):
+            dy = abs(y - cy)
+            if dy > R:
+                return None
+            dx = math.sqrt(max(0.0, R * R - dy * dy))
+            return (cx - dx, cx + dx)
 
+        def is_inside_fn(gx, gy, w, h):
+            m = margin
+            for px, py in [(gx-m, gy-m), (gx+w+m, gy-m), (gx+w+m, gy+h+m), (gx-m, gy+h+m)]:
+                if (px - cx) ** 2 + (py - cy) ** 2 > R * R + 1e-4:
+                    return False
+            return True
+    else:
+        outer_pts = outer_data['outer_polygon']
+        min_ox, min_oy, max_ox, max_oy = outer_data['outer_bbox']
+        prep_poly = None
+        if HAS_SHAPELY:
+            poly_obj = Polygon(outer_pts)
+            if not poly_obj.is_valid:
+                poly_obj = poly_obj.buffer(0)
+            prep_poly = prep(poly_obj)
+
+        def x_range_fn(y):
+            return get_poly_x_range(outer_pts, y)
+
+        def is_inside_fn(gx, gy, w, h):
+            m = margin
+            if HAS_SHAPELY and prep_poly is not None:
+                b = box(gx - m, gy - m, gx + w + m, gy + h + m)
+                return prep_poly.contains(b)
+
+            pts_to_check = [
+                (gx-m, gy-m), (gx+w+m, gy-m), (gx+w+m, gy+h+m), (gx-m, gy+h+m),
+                (gx + w*0.5, gy-m), (gx + w*0.5, gy+h+m),
+                (gx-m, gy + h*0.5), (gx+w+m, gy + h*0.5)
+            ]
+            for px, py in pts_to_check:
+                if not is_point_in_poly(px, py, outer_pts):
+                    return False
+            return True
+
+    def get_left_fit_x(gy, h):
+        """Find max left and min right envelope over height range [gy-margin, gy+h+margin]"""
+        max_left = -float('inf')
+        min_right = float('inf')
+        steps = 8
+        for i in range(steps + 1):
+            y = (gy - margin) + (i / float(steps)) * (h + 2 * margin)
+            rng = x_range_fn(y)
+            if rng is None:
+                return None, None
+            if rng[0] > max_left:
+                max_left = rng[0]
+            if rng[1] < min_right:
+                min_right = rng[1]
+        return max_left + margin, min_right - margin
+
+    # Sorting strategies
     parts = list(parts_data)
     if strategy_id == 0:
         parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
         rot_prefs = [0, 90]
+        align_pref = 'left'
     elif strategy_id == 1:
         parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_prefs = [90, 0]
+        rot_prefs = [0, 90]
+        align_pref = 'center'
     elif strategy_id == 2:
+        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
+        rot_prefs = [90, 0]
+        align_pref = 'left'
+    elif strategy_id == 3:
+        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
+        rot_prefs = [90, 0]
+        align_pref = 'center'
+    elif strategy_id == 4:
         parts.sort(key=lambda p: max(p['w'], p['h']), reverse=True)
         rot_prefs = [0, 90]
-    elif strategy_id == 3:
+        align_pref = 'center'
+    elif strategy_id == 5:
         parts.sort(key=lambda p: max(p['w'], p['h']), reverse=True)
         rot_prefs = [90, 0]
-    elif strategy_id == 4:
-        parts.sort(key=lambda p: p['h'], reverse=True)
-        rot_prefs = [0, 90]
-    elif strategy_id == 5:
-        parts.sort(key=lambda p: p['w'], reverse=True)
-        rot_prefs = [0, 90]
+        align_pref = 'left'
     elif strategy_id == 6:
+        parts.sort(key=lambda p: min(p['w'], p['h']), reverse=True)
+        rot_prefs = [0, 90]
+        align_pref = 'left'
+    elif strategy_id == 7:
         parts.sort(key=lambda p: 2 * (p['w'] + p['h']), reverse=True)
         rot_prefs = [0, 90]
-    elif strategy_id == 7:
-        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_prefs = [0]
-    elif strategy_id == 8:
-        parts.sort(key=lambda p: p['w'] * p['h'], reverse=True)
-        rot_prefs = [90]
+        align_pref = 'center'
     else:
         import random
-        rng = random.Random(strategy_id * 101 + 13)
-        rng.shuffle(parts)
+        rng_rand = random.Random(strategy_id * 101 + 17)
+        rng_rand.shuffle(parts)
         rot_prefs = [0, 90] if (strategy_id % 2 == 0) else [90, 0]
+        align_pref = 'center' if (strategy_id % 3 == 0) else 'left'
 
     placed = []
     plan = []
-
-    # Seed anchors
-    anchors = [(min_ox + margin, min_oy + margin)]
-
-    # Add side and step anchors
-    y_step = max(15.0, (max_oy - min_oy) / 40.0)
-    cy = min_oy + margin
-    while cy <= max_oy - margin:
-        anchors.append((min_ox + margin, cy))
-        cy += y_step
 
     for p in parts:
         pid = p['id']
@@ -142,41 +195,77 @@ def solve_nesting_strategy(args):
         best_w, best_h = pw, ph
         best_score = float('inf')
 
+        valid_rots = []
         for rot in rot_prefs:
             cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
-            if cur_w > (max_ox - min_ox) or cur_h > (max_oy - min_oy):
-                continue
+            if cur_w <= (max_ox - min_ox) and cur_h <= (max_oy - min_oy):
+                valid_rots.append(rot)
 
-            for ax, ay in anchors:
-                if ax + cur_w + margin > max_ox or ay + cur_h + margin > max_oy:
+        for rot in valid_rots:
+            cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
+
+            # Generate candidate heights gy
+            candidate_gys = []
+            step_y = max(4.0, (max_oy - min_oy) / 100.0)
+            cy_val = min_oy + margin
+            while cy_val + cur_h + margin <= max_oy:
+                candidate_gys.append(cy_val)
+                cy_val += step_y
+
+            for pr in placed:
+                top_y = pr[1] + pr[3] + gap
+                if top_y + cur_h + margin <= max_oy:
+                    candidate_gys.append(top_y)
+                candidate_gys.append(pr[1])
+
+            candidate_gys = sorted(list(set(candidate_gys)))
+
+            for gy in candidate_gys:
+                xl, xr = get_left_fit_x(gy, cur_h)
+                if xl is None or (xl + cur_w > xr):
                     continue
 
-                cur_r = (ax, ay, cur_w, cur_h)
-
-                overlap = False
-                for pr in placed:
-                    if rects_overlap(cur_r, pr, gap):
-                        overlap = True
-                        break
-                if overlap:
-                    continue
-
-                if not is_box_inside_poly(ax, ay, cur_w, cur_h, outer_pts, margin, prep_poly):
-                    continue
-
-                # BLF score
-                if strategy_id % 3 == 0:
-                    score = ay * 10000.0 + ax
-                elif strategy_id % 3 == 1:
-                    score = ax * 10000.0 + ay
+                # Candidate X coordinates: Left wall fit, Center fit, Right wall fit, Placed part steps
+                cand_xs = []
+                if align_pref == 'center':
+                    cand_xs.append((xl + xr - cur_w) * 0.5)
+                    cand_xs.append(xl)
+                    cand_xs.append(xr - cur_w)
                 else:
-                    score = (ay - min_oy)**2 + (ax - min_ox)**2
+                    cand_xs.append(xl)
+                    cand_xs.append((xl + xr - cur_w) * 0.5)
+                    cand_xs.append(xr - cur_w)
 
-                if score < best_score:
-                    best_score = score
-                    best_anchor = (ax, ay)
-                    best_rot = rot
-                    best_w, best_h = cur_w, cur_h
+                for pr in placed:
+                    if pr[1] < gy + cur_h and pr[1] + pr[3] > gy:
+                        cand_x = pr[0] + pr[2] + gap
+                        if cand_x + cur_w <= xr:
+                            cand_xs.append(cand_x)
+
+                for gx in cand_xs:
+                    cur_r = (gx, gy, cur_w, cur_h)
+                    collides = False
+                    for pr in placed:
+                        if rects_overlap(cur_r, pr, gap):
+                            collides = True
+                            break
+                    if collides:
+                        continue
+
+                    if not is_inside_fn(gx, gy, cur_w, cur_h):
+                        continue
+
+                    # Score: prioritize lower Y, then compact X
+                    if strategy_id % 2 == 0:
+                        score = (gy - min_oy) * 10000.0 + (gx - min_ox)
+                    else:
+                        score = (gy - min_oy) * 10000.0 + abs(gx - (min_ox + max_ox)*0.5)
+
+                    if score < best_score:
+                        best_score = score
+                        best_anchor = (gx, gy)
+                        best_rot = rot
+                        best_w, best_h = cur_w, cur_h
 
         if best_anchor is not None:
             gx, gy = best_anchor
@@ -189,16 +278,6 @@ def solve_nesting_strategy(args):
                 'h': best_h,
                 'rot': best_rot
             })
-            new_anchors = [
-                (gx + best_w + gap, gy),
-                (gx, gy + best_h + gap),
-                (gx + best_w + gap, gy + best_h + gap),
-                (min_ox + margin, gy + best_h + gap)
-            ]
-            for na in new_anchors:
-                if na[0] <= max_ox and na[1] <= max_oy and na not in anchors:
-                    anchors.append(na)
-            anchors.sort(key=lambda a: a[1] * 1000.0 + a[0])
 
     total_parts = len(parts_data)
     placed_count = len(plan)
@@ -226,26 +305,32 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         with open(input_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        outer_pts = data['outer_polygon']
-        outer_bbox = data['outer_bbox']
+        container_type = data.get('container_type', 'polygon')
         gap = float(data.get('gap', 3.0))
         margin = float(data.get('margin', 2.0))
         parts_data = data['parts']
         total_parts = len(parts_data)
 
+        outer_data = {
+            'container_type': container_type,
+            'outer_bbox': data.get('outer_bbox', [0, 0, 1000, 1000]),
+            'outer_polygon': data.get('outer_polygon', []),
+            'circle_center': data.get('circle_center', [0, 0]),
+            'circle_radius': float(data.get('circle_radius', 0.0))
+        }
+
         num_cpus = cpu_count()
         num_strategies = max(num_cpus, 20)
 
         tasks = [
-            (s_id, parts_data, outer_pts, outer_bbox, gap, margin)
+            (s_id, parts_data, outer_data, gap, margin)
             for s_id in range(num_strategies)
         ]
 
-        # Adaptive execution: If small batch (<= 10 parts), run sequentially for instant ~30ms response
-        # If larger batch, engage full multiprocessing pool across all cores
-        if total_parts <= 10:
+        # Adaptive execution
+        if total_parts <= 8:
             results = [solve_nesting_strategy(t) for t in tasks]
-            mode_str = f"Direct Fast-Path (20 Strategies, {total_parts} parts)"
+            mode_str = f"Direct Fast-Path ({num_strategies} Strategies, {total_parts} parts)"
         else:
             with Pool(processes=min(num_cpus, 20)) as pool:
                 results = pool.map(solve_nesting_strategy, tasks)
@@ -257,8 +342,9 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         is_success = (best_res['placed_count'] == total_parts)
         status_str = "SUCCESS" if is_success else "PARTIAL"
 
+        shape_label = "Circle/Pipe (Dia " + str(outer_data['circle_radius']*2) + ")" if container_type == 'circle' else "Curved/Polygon"
         msg = (f"MBBN Nesting: {best_res['placed_count']}/{total_parts} parts placed "
-               f"in {elapsed*1000.0:.1f}ms [{mode_str}] (Best Strategy #{best_res['strategy_id']})")
+               f"in {elapsed*1000.0:.1f}ms [{shape_label} | {mode_str}] (Best Strategy #{best_res['strategy_id']})")
 
         plan_lines = []
         for item in best_res['plan']:
@@ -286,6 +372,7 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
                 'elapsed_ms': elapsed * 1000.0,
                 'placed_count': best_res['placed_count'],
                 'total_parts': total_parts,
+                'container_type': container_type,
                 'plan': best_res['plan']
             }
             with open(output_json_path, 'w', encoding='utf-8') as f:
