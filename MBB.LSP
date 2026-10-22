@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 18:54:30
+;; LAST MODIFIED: 2026-10-22 20:05:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v1.8 (2026-10-22 20:05:00) : MBBN FFD(First-Fit Decreasing) 면적정렬 & 앵커포인트(BLF) 네스팅 고도화
 ;; - v1.0 (2026-04-06 00:00:00) : 최초 MBB 바운딩 박스 & 형상 분석기 안정화
 ;; - v1.1 (2026-09-12 13:48:40) : ExtractPoints 무손실 추출 및 직교 스냅 필터 적용
 ;; - v1.2 (2026-10-22 18:41:30) : MBBG 신규 추가 (문자 제외 순수 기하 기준 외곽 균등 여백 자동 배치)
@@ -2009,17 +2010,25 @@
   (princ)
 )
 
-;;; [MBBN] 그리드 세분화 모형 자동 배열 & 2D Nesting 알고리즘 (v1.7)
+;;; =============================================================================
+;;; [START: CURRENT ACTIVE - v1.8 MODIFIED (2026-10-22 20:05:00)]
+;;; [MBBN] 앵커포인트 & FFD 면적정렬 2D Nesting 다각형 내부 자동 배열 (v1.8)
+;;; - FFD(First-Fit Decreasing): 대형 부품 우선 배치로 공간 파편화 방지
+;;; - 앵커포인트(Bottom-Left Fill): 컨테이너 하단 및 기배치 부품 외곽선 기반 밀착 배치
+;;; - 경사면 벽면 추종(Wall-Hugging): 테이퍼/경사 다각형 벽면에 맞춘 자동 앵커 보정
+;;; - 개별 부품 독립 회전: 부품별 0도 / 90도 회전 독립 탐색
+;;; - 부속 텍스트 1:1 동기화 이동 및 90도 회전 완벽 지원
 ;;; =============================================================================
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
-                  out-min out-max out-pts p1 p2
+                  out-min out-max out-pts p1 p2 num-v vi
                   geom-list text-list parts-list
-                  tmp-min tmp-max b-min b-max w h
-                  t-pt best-plan placed strats strat cur-plan
-                  grid-step gap margin out-min-x out-max-x out-min-y out-max-y
-                  y-steps x-steps yi xi gy gx cur-r collides found all-ok
+                  tmp-min tmp-max b-min b-max w h area
+                  t-pt best-plan placed
+                  gap margin out-min-x out-max-x out-min-y out-max-y
+                  anchors wall-anchors ax ay cur-r collides found
                   item geom text-objs all-objs rot orig-min orig-w orig-h
-                  move-dx move-dy )
+                  move-dx move-dy pr pr-x pr-y pr-w pr-h rng
+                  min-x max-x gy gx )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -2030,7 +2039,7 @@
       (vl-catch-all-apply 'vla-EndUndoMark (list acDoc))
     )
     (if (and msg (not (wcmatch (strcase msg t) "*break*,*cancel*,*exit*")))
-      (princ (strcat "\n>> [MBBN 오류]: " msg))
+      (princ (strcat "\n>> [MBBN 에러]: " msg))
     )
     (setvar 'CMDECHO 1)
     (princ)
@@ -2040,7 +2049,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v1.7] 그리드 세분화 모형 자동 배열 & 2D Nesting")
+  (princ "\n[MBBN v1.8] FFD 앵커포인트 모형 자동 배열 & 2D Nesting")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 컨테이너 다각형 선택
@@ -2060,20 +2069,39 @@
                   out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
           )
         )
-        ;; 외곽 다각형 정점 좌표 추출
-        (setq p1 nil)
-        (if (vlax-property-available-p obj 'Coordinates)
-          (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
-        )
-        (if (or (vl-catch-all-error-p p1) (null p1))
-          (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
-            (setq p1 (vlax-safearray->list (vlax-variant-value p2)))
+        ;; WCS Curve 정점 추출 (1순위)
+        (setq num-v nil)
+        (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
+          (if (and (numberp num-v) (> num-v 0))
+            (progn
+              (setq vi 0)
+              (while (< vi num-v)
+                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+                  (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                )
+                (setq vi (1+ vi))
+              )
+            )
           )
         )
-        (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
-          (while p1
-            (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
-            (setq p1 (cddr p1))
+        ;; Curve 정점 없을 때 Coordinates 백업 추출
+        (if (null out-pts)
+          (progn
+            (setq p1 nil)
+            (if (vlax-property-available-p obj 'Coordinates)
+              (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
+            )
+            (if (or (vl-catch-all-error-p p1) (null p1))
+              (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
+                (setq p1 (vlax-safearray->list (vlax-variant-value p2)))
+              )
+            )
+            (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
+              (while p1
+                (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                (setq p1 (cddr p1))
+              )
+            )
           )
         )
       )
@@ -2106,7 +2134,7 @@
                 )
               )
 
-              ;; 부품 형상과 부속 문자 자동 1:1 그루핑
+              ;; 부품 및 부속 문자 자동 1:1 매핑 및 규격 산출
               (setq parts-list '() i 1)
               (foreach g geom-list
                 (setq geom (nth 0 g)
@@ -2114,10 +2142,11 @@
                       b-max (nth 2 g)
                       w (- (car b-max) (car b-min))
                       h (- (cadr b-max) (cadr b-min))
+                      area (* w h)
                       text-objs '())
                 (foreach t-item text-list
                   (setq t-pt (nth 1 t-item))
-                  ;; 부품 BBOX 내부 또는 50mm 인접 문자를 부속 문자로 식별
+                  ;; 부품 BBOX 내부 또는 50mm 이내의 문자를 부속 문자로 식별
                   (if (and (<= (- (car b-min) 50.0) (car t-pt))
                            (<= (car t-pt) (+ (car b-max) 50.0))
                            (<= (- (cadr b-min) 50.0) (cadr t-pt))
@@ -2125,52 +2154,82 @@
                     (setq text-objs (cons (nth 0 t-item) text-objs))
                   )
                 )
-                (princ (strcat "\n   - [부품 " (itoa i) "] 폭 = " (rtos w 2 1) " mm, 높이 = " (rtos h 2 1) " mm (문자 " (itoa (length text-objs)) "개 동반)"))
-                (setq parts-list (cons (list geom text-objs (cons geom text-objs) b-min b-max w h) parts-list)
+                ;; item 구조: (geom text-objs all-objs b-min b-max w h area)
+                (setq parts-list (cons (list geom text-objs (cons geom text-objs) b-min b-max w h area) parts-list)
                       i (1+ i))
               )
 
               (if parts-list
                 (progn
-                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 부품 인식 완료. 2mm 정밀 그리드 네스팅 연산 시작..."))
-                  ;; 마진 2mm, 간격 3mm, 그리드 스텝 2mm (초정밀 밀착 네스팅)
+                  ;; FFD (First-Fit Decreasing): 면적 내림차순 정렬 (대형 부품 우선 배치)
+                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 7 a) (nth 7 b)))))
+                  
+                  (setq i 1)
+                  (foreach p parts-list
+                    (princ (strcat "\n   - [부품 " (itoa i) "] 폭 = " (rtos (nth 5 p) 2 1) 
+                                   " mm, 높이 = " (rtos (nth 6 p) 2 1) " mm (문자 " (itoa (length (nth 1 p))) "개)"))
+                    (setq i (1+ i))
+                  )
+
+                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 부품 FFD 정렬 완료. 앵커포인트 네스팅 연산 중..."))
+
                   (setq gap 3.0
                         margin 2.0
-                        grid-step 2.0
                         out-min-x (car out-min)
                         out-max-x (car out-max)
                         out-min-y (cadr out-min)
                         out-max-y (cadr out-max)
-                        best-plan nil)
+                        placed '()
+                        best-plan '())
 
-                  ;; 전략 탐색: [0도 우선] -> 실패 시 [90도 회전 우선]
-                  (setq strats '((0 90) (90 0)))
-                  (while (and strats (null best-plan))
-                    (setq strat (car strats)
-                          strats (cdr strats)
-                          placed '()
-                          cur-plan '()
-                          all-ok T)
-                    (foreach p parts-list
-                      (setq orig-w (nth 5 p)
-                            orig-h (nth 6 p)
-                            found nil)
-                      (foreach rot strat
-                        (if (null found)
-                          (progn
-                            (setq w (if (= rot 90) orig-h orig-w)
-                                  h (if (= rot 90) orig-w orig-h)
-                                  y-steps (fix (/ (- out-max-y out-min-y h (* 2.0 margin)) grid-step))
-                                  x-steps (fix (/ (- out-max-x out-min-x w (* 2.0 margin)) grid-step))
-                                  yi 0)
-                            (while (and (<= yi y-steps) (null found))
-                              (setq gy (+ out-min-y margin (* yi grid-step))
-                                    xi 0)
-                              (while (and (<= xi x-steps) (null found))
-                                (setq gx (+ out-min-x margin (* xi grid-step)))
-                                (if (MBBN:IsRectInsidePoly gx gy w h out-pts margin)
+                  ;; 부품별 앵커포인트 + 회전(0도, 90도) 탐색
+                  (foreach p parts-list
+                    (setq orig-w (nth 5 p)
+                          orig-h (nth 6 p)
+                          found nil)
+
+                    ;; 1. 후보 앵커 포인트 수집 (초기 좌하단 + 기배치 부품 우측/상단)
+                    (setq anchors (list (list (+ out-min-x margin) (+ out-min-y margin))))
+                    (foreach pr placed
+                      (setq pr-x (nth 0 pr)
+                            pr-y (nth 1 pr)
+                            pr-w (nth 2 pr)
+                            pr-h (nth 3 pr))
+                      (setq anchors (cons (list (+ pr-x pr-w gap) pr-y) anchors))
+                      (setq anchors (cons (list pr-x (+ pr-y pr-h gap)) anchors))
+                      (setq anchors (cons (list (+ out-min-x margin) (+ pr-y pr-h gap)) anchors))
+                    )
+
+                    ;; 경사면 벽면 추종(Wall-Hugging) 앵커 추가
+                    (setq wall-anchors '())
+                    (foreach a anchors
+                      (setq ay (cadr a)
+                            rng (MBBG:GetXRangeAtY out-pts ay))
+                      (if rng
+                        (setq wall-anchors (cons (list (+ (car rng) margin) ay) wall-anchors))
+                      )
+                    )
+                    (setq anchors (append anchors wall-anchors))
+
+                    ;; Y 오름차순, X 오름차순 정렬
+                    (setq anchors (vl-sort anchors '(lambda (pt1 pt2)
+                                                     (if (equal (cadr pt1) (cadr pt2) 1.0)
+                                                       (< (car pt1) (car pt2))
+                                                       (< (cadr pt1) (cadr pt2))))))
+
+                    ;; 앵커 포인트 기반 탐색 (0도 및 90도 회전 순차 테스트)
+                    (foreach rot '(0 90)
+                      (if (null found)
+                        (progn
+                          (setq w (if (= rot 90) orig-h orig-w)
+                                h (if (= rot 90) orig-w orig-h))
+                          (foreach a anchors
+                            (if (null found)
+                              (progn
+                                (setq ax (car a) ay (cadr a))
+                                (if (MBBN:IsRectInsidePoly ax ay w h out-pts margin)
                                   (progn
-                                    (setq cur-r (list gx gy w h)
+                                    (setq cur-r (list ax ay w h)
                                           collides nil)
                                     (foreach pr placed
                                       (if (MBBN:RectsOverlap cur-r pr gap)
@@ -2180,26 +2239,67 @@
                                     (if (null collides)
                                       (progn
                                         (setq placed (cons cur-r placed)
-                                              cur-plan (cons (list p gx gy w h rot) cur-plan)
+                                              best-plan (cons (list p ax ay w h rot) best-plan)
                                               found T)
                                       )
                                     )
                                   )
                                 )
-                                (setq xi (1+ xi))
                               )
-                              (setq yi (1+ yi))
                             )
                           )
                         )
                       )
-                      (if (null found) (setq all-ok nil))
                     )
-                    (if all-ok (setq best-plan cur-plan))
+
+                    ;; 앵커 포인트에서 찾지 못한 경우 정밀 스캔 백업 (5mm 스텝)
+                    (if (null found)
+                      (foreach rot '(0 90)
+                        (if (null found)
+                          (progn
+                            (setq w (if (= rot 90) orig-h orig-w)
+                                  h (if (= rot 90) orig-w orig-h)
+                                  gy (+ out-min-y margin))
+                            (while (and (<= (+ gy h margin) out-max-y) (null found))
+                              (setq rng (MBBG:GetXRangeAtY out-pts gy))
+                              (if rng
+                                (progn
+                                  (setq min-x (max (+ out-min-x margin) (+ (car rng) margin))
+                                        max-x (min (- out-max-x w margin) (- (cadr rng) w margin))
+                                        gx min-x)
+                                  (while (and (<= gx max-x) (null found))
+                                    (if (MBBN:IsRectInsidePoly gx gy w h out-pts margin)
+                                      (progn
+                                        (setq cur-r (list gx gy w h)
+                                              collides nil)
+                                        (foreach pr placed
+                                          (if (MBBN:RectsOverlap cur-r pr gap)
+                                            (setq collides T)
+                                          )
+                                        )
+                                        (if (null collides)
+                                          (progn
+                                            (setq placed (cons cur-r placed)
+                                                  best-plan (cons (list p gx gy w h rot) best-plan)
+                                                  found T)
+                                          )
+                                        )
+                                      )
+                                    )
+                                    (setq gx (+ gx 5.0))
+                                  )
+                                )
+                              )
+                              (setq gy (+ gy 5.0))
+                            )
+                          )
+                        )
+                      )
+                    )
                   )
 
-                  ;; 네스팅 배치 실행
-                  (if best-plan
+                  ;; 전체 부품 배치 완료 검증
+                  (if (and best-plan (= (length best-plan) (length parts-list)))
                     (progn
                       (foreach item best-plan
                         (setq p (nth 0 item)
@@ -2228,24 +2328,24 @@
                         )
                       )
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN 완료] 총 " (itoa (length best-plan)) "개 부품 그리드 세분화 자동 배열 완료!"))
-                      (princ (strcat "\n   - 부품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 마진(Margin): " (rtos margin 2 1) " mm"))
-                      (princ "\n   - 부품과 부속 문자가 원형을 유지하며 100% 외곽선 내부에 완벽 안착되었습니다.")
+                      (princ (strcat "\n>> [MBBN 완료] 총 " (itoa (length best-plan)) "개 부품 FFD 앵커 네스팅 자동 배열 완료!"))
+                      (princ (strcat "\n   - 부품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 여백(Margin): " (rtos margin 2 1) " mm"))
+                      (princ "\n   - 부품과 부속 문자가 동기화되어 100% 외곽선 내부에 완벽 배치되었습니다.")
                       (princ "\n================================================================")
                     )
                     (princ "\n>> 오류: 외곽 컨테이너 공간이 협소하여 모든 부품을 배치할 수 없습니다.")
                   )
                 )
-                (princ "\n>> 오류: 배치 가능한 형상 부품 객체가 없습니다.")
+                (princ "\n>> 오류: 배치 가능한 내부 부품 객체가 없습니다.")
               )
             )
-            (princ "\n>> 선택 취소: 배치할 부품이 선택되지 않았습니다.")
+            (princ "\n>> 안내: 배치할 부품이 선택되지 않았습니다.")
           )
         )
-        (princ "\n>> 오류: 외곽 다각형의 기하 정점을 추출할 수 없습니다.")
+        (princ "\n>> 오류: 외곽 다각형 정점 좌표를 추출할 수 없습니다.")
       )
     )
-    (princ "\n>> 선택 취소: 외곽 컨테이너가 선택되지 않았습니다.")
+    (princ "\n>> 안내: 외곽 컨테이너가 선택되지 않았습니다.")
   )
 
   (if (and ss-out (= (type ss-out) 'PICKSET)) (setq ss-out nil))
