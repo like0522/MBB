@@ -6,6 +6,7 @@
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.5 (2026-10-22 21:55:00) : MBBN 경로 탐색 방어 강화 (findfile nil 예외 방어 MBB:GetRootDir 구현, stringp nil 에러 원천 차단 및 백슬래시 정규화)
 ;; - v2.4 (2026-10-22 21:27:00) : MBBN AutoCAD <-> Python 멀티코어(20-Core) 초고속 2D 네스팅 자동 연동 시스템 구축
 ;;                                 (WScript.Shell 백그라운드 무창 동기 통신, Fast-Path & 20코어 Shapely/GEOS C-엔진, 모형+문자 100% 무결점 일괄 자동 배치)
 ;; - v2.3 (2026-10-22 21:15:00) : MBBG 외형 틀 자동 이동 & 스마트 양방향 선택 감싸기 (모형 고정, 글자 분리 0% 방어)
@@ -2123,6 +2124,31 @@
 ;;; [END: ROLLBACK ANCHOR - v2.3 ORIGINAL]
 
 ;;; [START: CURRENT ACTIVE - v2.4 MODIFIED (2026-10-22 21:27:00)]
+;;; [MBB:GetRootDir] 프로젝트 루트 및 스크립트 실행 경로 안전 반환 (findfile nil 방어)
+(defun MBB:GetRootDir ( / p d )
+  (cond
+    ;; 1. Global root variable if valid
+    ((and (boundp '*MBB_ROOT_DIR*) *MBB_ROOT_DIR* (vl-file-directory-p *MBB_ROOT_DIR*))
+     *MBB_ROOT_DIR*)
+    ;; 2. Direct check of known absolute project path
+    ((findfile "C:/Users/like/OneDrive/문서/MBB/mbb_nesting.py")
+     "C:/Users/like/OneDrive/문서/MBB")
+    ;; 3. If mbb_nesting.py is found anywhere in AutoCAD search paths
+    ((and (setq p (findfile "mbb_nesting.py"))
+          (setq d (vl-filename-directory p)))
+     d)
+    ;; 4. If MBB.LSP is found in AutoCAD search paths
+    ((and (setq p (findfile "MBB.LSP"))
+          (setq d (vl-filename-directory p)))
+     d)
+    ;; 5. Current DWG directory
+    ((and (getvar "DWGPREFIX") (vl-file-directory-p (getvar "DWGPREFIX")))
+     (vl-string-right-trim "\\" (vl-string-right-trim "/" (getvar "DWGPREFIX"))))
+    ;; 6. Temp prefix fallback
+    (t (vl-string-right-trim "\\" (vl-string-right-trim "/" (getvar "TEMPPREFIX"))))
+  )
+)
+
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max out-pts p1 p2 num-v vi
                   total-len step-dist cur-dist
@@ -2362,16 +2388,23 @@
                   )
                   (setq id-parts-list (reverse id-parts-list))
 
-                  ;; 파일 경로 설정 (LISP 파일과 동일 디렉토리)
-                  (setq cur-dir (vl-filename-directory (findfile "MBB.LSP")))
+                  ;; 파일 경로 설정 (findfile nil 방어 MBB:GetRootDir 사용)
+                  (setq cur-dir (MBB:GetRootDir))
                   (if (or (null cur-dir) (= cur-dir ""))
-                    (setq cur-dir (getvar "DWGPREFIX"))
+                    (setq cur-dir "C:/Users/like/OneDrive/문서/MBB")
                   )
+                  (setq cur-dir (vl-string-translate "/" "\\" cur-dir))
                   (setq py-script (strcat cur-dir "\\mbb_nesting.py")
                         json-in   (strcat cur-dir "\\mbb_nesting_in.json")
                         json-out  (strcat cur-dir "\\mbb_nesting_out.json")
                         lsp-out   (strcat cur-dir "\\mbb_nesting_out.lsp")
                         bat-path  (strcat cur-dir "\\mbb_run.bat"))
+                  ;; py-script 보정: 만약 cur-dir에 없으면 재탐색
+                  (if (null (findfile py-script))
+                    (if (setq p (findfile "mbb_nesting.py"))
+                      (setq py-script p)
+                    )
+                  )
 
                   ;; 1. Python 입력 JSON 고속 생성
                   (setq f (open json-in "w"))
