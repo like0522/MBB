@@ -6,6 +6,8 @@
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.9 (2026-10-23 07:17:00) : MBBN 실행 시 외곽 여유(Margin) 및 단품 간격(Gap) 대화식 동적 설정 기능 추가
+;;                                 (Enter 직전값 유지, 세션 메모리 *MBBN_MARGIN* / *MBBN_GAP*, initget 음수 방어)
 ;; - v2.8 (2026-10-23 07:03:00) : MBBN 다중 외곽 컨테이너(Multi-Container) 지원 & 자재 수율(Yield) 극대화 멀티코어 2D 네스팅 구축
 ;;                                 (복수 원형/사각/잔재 컨테이너 동시 선택, 36개 멀티코어 전략 기반 최적 판재 할당 및 일괄 자동 배치)
 ;; - v2.7 (2026-10-22 22:25:00) : MBBN 원형(Circle/Pipe Φ890) 5/5 단품 100% 전량 배치 완성 (원형 반경 ε오차 방어, 32전략 멀티코어 탐색)
@@ -2197,8 +2199,28 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v2.8] 다중 컨테이너(Multi-Container) 자재 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v2.9] 다중 컨테이너(Multi-Container) 자재 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
+
+  ;; 전역 기본값 세션 유지 (직전 값 기억)
+  (if (null *MBBN_MARGIN*) (setq *MBBN_MARGIN* 2.0))
+  (if (null *MBBN_GAP*)    (setq *MBBN_GAP* 3.0))
+
+  ;; 0단계: 외곽 여유(Margin) 및 단품 간격(Gap) 동적 입력
+  (initget 4)
+  (setq margin (getdist (strcat "\n>> [설정] 외곽 컨테이너 여유(Margin) mm <" (rtos *MBBN_MARGIN* 2 1) ">: ")))
+  (if (null margin)
+    (setq margin *MBBN_MARGIN*)
+    (setq *MBBN_MARGIN* margin)
+  )
+
+  (initget 4)
+  (setq gap (getdist (strcat "\n>> [설정] 단품 간격(Gap) mm <" (rtos *MBBN_GAP* 2 1) ">: ")))
+  (if (null gap)
+    (setq gap *MBBN_GAP*)
+    (setq *MBBN_GAP* gap)
+  )
+  (princ (strcat "\n>> [적용 여유] 외곽 여유: " (rtos margin 2 1) " mm / 단품 간격: " (rtos gap 2 1) " mm"))
 
   ;; 1단계: 외곽 컨테이너 복수 선택 (원형/사각/비정형 잔재 1개 또는 여러 개)
   (princ "\n>> [1단계] 단품들을 배치할 외곽 컨테이너(틀/파이프) 선택 (복수 선택 가능): ")
@@ -2432,8 +2454,7 @@
                     (setq i (1+ i))
                   )
 
-                  (setq gap 3.0
-                        margin 2.0)
+                  ;; (margin & gap 설정값 유지)
 
                   ;; 단품 목록에 고유 ID(0, 1, 2...) 부여
                   (setq id-parts-list '()
