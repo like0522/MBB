@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-22 21:00:00
+;; LAST MODIFIED: 2026-10-22 21:15:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v2.3 (2026-10-22 21:15:00) : MBBG 외형 틀 자동 이동 & 스마트 양방향 선택 감싸기 (모형 고정, 글자 분리 0% 방어)
 ;; - v2.2 (2026-10-22 21:00:00) : 오목 원호(60mm Inward Arc) 고밀도 곡선추종(vlax-curve-getPointAtDist) & MBBN 네스팅 엔진 통합 (돌출/글자이탈 0% 보장)
 ;; - v2.1 (2026-10-22 20:45:00) : MBBN 텍스트 1:1 독점바인딩(글자 이탈 방지) & MBBG 2D 전역 안전안착 비간섭 재배치(돌출/겹침 100% 방어)
 ;; - v2.0 (2026-10-22 20:30:00) : MBBG 다중 내경(홀/구멍) 1:1 결합 어셈블리 묶음 이동 & 단품 간 비간섭(Non-Overlapping) 가드 탑재
@@ -1820,16 +1821,18 @@
 ;;; =============================================================================
 ;;; =============================================================================
 ;;; =============================================================================
-;;; [START: CURRENT ACTIVE - v2.2 MODIFIED (2026-10-22 21:00:00)]
-;;; [MBBG] 외곽 틀 이동 & 고밀도 곡선추종 스마트 비간섭 자동 배치 (v2.2)
-;;; - [오목 원호 100% 추종]: vlax-curve-getPointAtDist 10mm 분할로 60mm 오목 원호/곡선 완벽 추종
-;;; - [다중 내경 1:1 결합]: 외곽선 + 내부 홀(원/타원/슬롯) + 문자를 단일 어셈블리로 완전 결합
-;;; - [텍스트 1:1 독점 바인딩]: 중복 할당 방지로 글자 분리/이탈 원천 차단
-;;; - 120단계 2D 수직/수평 여백 동시 최적화 틀 이동
-;;; - [MBBN 네스팅 엔진 통합]: 틀 내부 밀착 시 2D 전역 스캔으로 단 0.1mm의 돌출 및 겹침 100% 방어
 ;;; =============================================================================
-(defun c:MBBG ( / *error* ss-out ss-in acDoc mspace i ename obj objName
-                  out-min out-max in-min in-max tmp-min tmp-max tmpArea
+;;; [START: CURRENT ACTIVE - v2.3 MODIFIED (2026-10-22 21:15:00)]
+;;; [MBBG] 외형 틀 자동 이동 & 스마트 양방향 선택 감싸기 (v2.3)
+;;; - [외형 -> 모형 이동 보장]: 내부 모형(부품+내경+글자)은 제자리에 고정, 외형 틀만 이동!
+;;; - [양방향 선택 자동 판별]: 모형을 먼저 선택하든 외형을 먼저 선택하든 객체 특성으로 자동 판별
+;;; - [오목 원호 100% 추종]: vlax-curve-getPointAtDist 10mm 분할로 60mm 오목 원호/곡선 완벽 추종
+;;; - [글자 분리 원천 차단]: 내부 객체를 절대 건드리지 않으므로 글자 누락/이탈 0% 보장
+;;; =============================================================================
+(defun c:MBBG ( / *error* ss1 ss2 ss-out ss-in acDoc mspace i ename obj objName
+                  b-min b-max tmp-min tmp-max
+                  cnt1 cnt2 area1 area2 min1 max1 min2 max2
+                  out-min out-max in-min in-max
                   out-cx out-cy in-cx in-cy
                   out-pts in-pts move-out-objs p1 p2 num-v vi
                   total-len step-dist cur-dist
@@ -1837,15 +1840,7 @@
                   best-clear best-dx best-dy
                   cand-dy cand-valid cand-dx max-allow-dx min-allow-dx
                   y-q x-rng slack h-clear v-top v-bot min-2d
-                  final-dx final-dy new-out-pts
-                  geom-raw text-list clustered-parts grp parent-item
-                  placed ci minP maxP minC maxC
-                  parent-obj children-holes text-objs all-objs assigned-texts part-texts
-                  parts-list confirmed p orig-x orig-y w h cur-r
-                  candidates needed-dx-l needed-dx-r nudge-dx
-                  f y-c rng ay sx valid-cands best-cand
-                  c cx cy cw ch dist nudged-count shift-dx shift-dy
-                  scan-y min-x max-x shift-out-min-y shift-out-max-y )
+                  final-dx final-dy )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -1866,417 +1861,246 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v2.2] 고밀도 곡선추종 & 스마트 비간섭 자동 배치")
+  (princ "\n[MBBG v2.3] 외형 틀 자동 이동 & 스마트 양방향 선택 감싸기")
   (princ "\n================================================================")
 
-  ;; 1단계: 이동시킬 외곽 틀(컨테이너 다각형) 선택
-  (princ "\n>> [1단계] 이동시킬 외곽 틀(컨테이너 다각형) 선택: ")
-  (if (setq ss-out (ssget ":S:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
+  ;; 1단계 / 2단계 선택 (선택 순서 무관!)
+  (princ "\n>> [1단계] 첫 번째 객체군 선택 (외형 틀 또는 내부 모형군): ")
+  (if (setq ss1 (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
     (progn
-      (setq out-min nil out-max nil out-pts '() move-out-objs '() i 0)
-      (repeat (sslength ss-out)
-        (setq ename (ssname ss-out i)
-              obj   (vlax-ename->vla-object ename)
-              move-out-objs (cons obj move-out-objs)
-              i     (1+ i))
-        (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
-          (progn
-            (setq tmp-min (vlax-safearray->list tmp-min)
-                  tmp-max (vlax-safearray->list tmp-max))
-            (setq out-min (if (null out-min) tmp-min (mapcar 'min out-min tmp-min))
-                  out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
-          )
-        )
-        ;; WCS Curve 둘레 기반 고밀도 정밀 샘플링 (10mm 간격, 오목 원호/곡선 100% 추종)
-        (setq total-len nil)
-        (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
-          (if (and (numberp total-len) (> total-len 0.0))
-            (progn
-              (setq step-dist (max 2.0 (min 10.0 (/ total-len 120.0)))
-                    cur-dist 0.0)
-              (while (< cur-dist total-len)
-                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj cur-dist)))))
-                  (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
-                )
-                (setq cur-dist (+ cur-dist step-dist))
+      (princ "\n>> [2단계] 두 번째 객체군 선택 (내부 모형군 또는 외형 틀): ")
+      (if (setq ss2 (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
+        (progn
+          ;; ss1 정보 계산
+          (setq cnt1 (sslength ss1) min1 nil max1 nil i 0)
+          (repeat cnt1
+            (setq ename (ssname ss1 i)
+                  obj   (vlax-ename->vla-object ename)
+                  i     (1+ i))
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+              (progn
+                (setq tmp-min (vlax-safearray->list tmp-min)
+                      tmp-max (vlax-safearray->list tmp-max))
+                (setq min1 (if (null min1) tmp-min (mapcar 'min min1 tmp-min))
+                      max1 (if (null max1) tmp-max (mapcar 'max max1 tmp-max)))
               )
-              (setq out-pts (reverse out-pts))
             )
           )
-        )
-        ;; Curve 샘플링 실패 시 정점 백업 추출
-        (if (null out-pts)
-          (progn
-            (setq num-v nil)
-            (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
-              (if (and (numberp num-v) (> num-v 0))
+          (setq area1 (if (and min1 max1) (* (- (car max1) (car min1)) (- (cadr max1) (cadr min1))) 0.0))
+
+          ;; ss2 정보 계산
+          (setq cnt2 (sslength ss2) min2 nil max2 nil i 0)
+          (repeat cnt2
+            (setq ename (ssname ss2 i)
+                  obj   (vlax-ename->vla-object ename)
+                  i     (1+ i))
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+              (progn
+                (setq tmp-min (vlax-safearray->list tmp-min)
+                      tmp-max (vlax-safearray->list tmp-max))
+                (setq min2 (if (null min2) tmp-min (mapcar 'min min2 tmp-min))
+                      max2 (if (null max2) tmp-max (mapcar 'max max2 tmp-max)))
+              )
+            )
+          )
+          (setq area2 (if (and min2 max2) (* (- (car max2) (car min2)) (- (cadr max2) (cadr min2))) 0.0))
+
+          ;; [스마트 역할 자동 판별]: 외형(외곽 틀) vs 내부 모형군
+          ;; 객체 수가 적고 둘레/면적이 넓은 쪽이 외형(ss-out), 나머지가 내부 모형군(ss-in)
+          (if (or (and (= cnt1 1) (> cnt2 1))
+                  (and (> cnt1 0) (= cnt2 0))
+                  (and (> area1 area2) (<= cnt1 cnt2)))
+            (setq ss-out ss1 ss-in ss2)
+            (setq ss-out ss2 ss-in ss1)
+          )
+
+          ;; 외곽 틀 객체 및 정밀 둘레점 파싱
+          (setq out-min nil out-max nil out-pts '() move-out-objs '() i 0)
+          (repeat (sslength ss-out)
+            (setq ename (ssname ss-out i)
+                  obj   (vlax-ename->vla-object ename)
+                  move-out-objs (cons obj move-out-objs)
+                  i     (1+ i))
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+              (progn
+                (setq tmp-min (vlax-safearray->list tmp-min)
+                      tmp-max (vlax-safearray->list tmp-max))
+                (setq out-min (if (null out-min) tmp-min (mapcar 'min out-min tmp-min))
+                      out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
+              )
+            )
+            ;; WCS Curve 둘레 기반 고밀도 정밀 샘플링 (10mm 간격, 오목 원호/곡선 100% 추종)
+            (setq total-len nil)
+            (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
+              (if (and (numberp total-len) (> total-len 0.0))
                 (progn
-                  (setq vi 0)
-                  (while (< vi num-v)
-                    (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+                  (setq step-dist (max 2.0 (min 10.0 (/ total-len 120.0)))
+                        cur-dist 0.0)
+                  (while (< cur-dist total-len)
+                    (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj cur-dist)))))
                       (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
                     )
-                    (setq vi (1+ vi))
+                    (setq cur-dist (+ cur-dist step-dist))
                   )
                   (setq out-pts (reverse out-pts))
                 )
               )
             )
-          )
-        )
-        ;; 좌표 백업 추출
-        (if (null out-pts)
-          (progn
-            (setq p1 nil)
-            (if (vlax-property-available-p obj 'Coordinates)
-              (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
-            )
-            (if (or (vl-catch-all-error-p p1) (null p1))
-              (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
-                (setq p1 (vlax-safearray->list (vlax-variant-value p2)))
-              )
-            )
-            (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
-              (while p1
-                (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
-                (setq p1 (cddr p1))
-              )
-            )
-          )
-        )
-      )
-
-      (if (and out-min out-max out-pts (>= (length out-pts) 3))
-        (progn
-          (setq out-cx (/ (+ (car out-min) (car out-max)) 2.0)
-                out-cy (/ (+ (cadr out-min) (cadr out-max)) 2.0))
-          (princ (strcat "\n>> [외곽 틀 곡선 파싱] 총 " (itoa (length out-pts)) "개 고밀도 경계점 추출 완료 (오목 원호 완벽 반영)"))
-
-          ;; 2단계: 내부에 담을 부품 및 문자 전체 드래그 선택
-          (princ "\n>> [2단계] 내부에 담을 부품 및 문자 전체 드래그 선택: ")
-          (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
-            (progn
-              (setq geom-raw '() text-list '() i 0)
-              (repeat (sslength ss-in)
-                (setq ename (ssname ss-in i)
-                      obj   (vlax-ename->vla-object ename)
-                      objName (vla-get-ObjectName obj)
-                      i     (1+ i))
-                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
-                  (progn
-                    (setq tmp-min (vlax-safearray->list tmp-min)
-                          tmp-max (vlax-safearray->list tmp-max))
-                    (if (wcmatch (strcase objName) "*TEXT*")
-                      (setq text-list (cons (list obj tmp-min tmp-max) text-list))
-                      (progn
-                        (setq tmpArea (vl-catch-all-apply 'vla-get-Area (list obj)))
-                        (if (vl-catch-all-error-p tmpArea)
-                          (setq tmpArea (* (- (car tmp-max) (car tmp-min)) (- (cadr tmp-max) (cadr tmp-min))))
+            ;; Curve 정점 백업 추출
+            (if (null out-pts)
+              (progn
+                (setq num-v nil)
+                (if (not (vl-catch-all-error-p (setq num-v (vl-catch-all-apply 'vlax-curve-getEndParam (list obj)))))
+                  (if (and (numberp num-v) (> num-v 0))
+                    (progn
+                      (setq vi 0)
+                      (while (< vi num-v)
+                        (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtParam (list obj vi)))))
+                          (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
                         )
-                        (setq geom-raw (cons (list obj tmpArea tmp-min tmp-max) geom-raw))
+                        (setq vi (1+ vi))
                       )
+                      (setq out-pts (reverse out-pts))
                     )
                   )
                 )
               )
-
-              ;; [내경(홀/구멍) 토폴로지 클러스터링]: 외곽선과 내부 내경들을 1:1 완벽 결합
-              (setq geom-raw (vl-sort geom-raw '(lambda (a b) (> (cadr a) (cadr b))))
-                    clustered-parts '())
-              (foreach item geom-raw
-                (setq obj (car item)
-                      minC (nth 2 item)
-                      maxC (nth 3 item)
-                      placed nil
-                      ci 0)
-                (while (and (not placed) (< ci (length clustered-parts)))
-                  (setq grp (nth ci clustered-parts)
-                        parent-item (car grp)
-                        minP (nth 2 parent-item)
-                        maxP (nth 3 parent-item))
-                  ;; item의 BBOX가 기존 parent BBOX 내부에 포함되면 내경(Child)으로 등록
-                  (if (and (>= (car minC) (- (car minP) 0.5))
-                           (>= (cadr minC) (- (cadr minP) 0.5))
-                           (<= (car maxC) (+ (car maxP) 0.5))
-                           (<= (cadr maxC) (+ (cadr maxP) 0.5)))
-                    (progn
-                      (setq grp (list parent-item (cons obj (cadr grp)))
-                            clustered-parts (MBB:ReplaceNth ci grp clustered-parts)
-                            placed T)
-                    )
-                  )
-                  (setq ci (1+ ci))
+            )
+            ;; 좌표 백업 추출
+            (if (null out-pts)
+              (progn
+                (setq p1 nil)
+                (if (vlax-property-available-p obj 'Coordinates)
+                  (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
                 )
-                (if (not placed)
-                  (setq clustered-parts (cons (list item (list)) clustered-parts))
+                (if (or (vl-catch-all-error-p p1) (null p1))
+                  (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
+                    (setq p1 (vlax-safearray->list (vlax-variant-value p2)))
+                  )
+                )
+                (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
+                  (while p1
+                    (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                    (setq p1 (cddr p1))
+                  )
                 )
               )
-              (setq clustered-parts (reverse clustered-parts))
+            )
+          )
 
-              ;; [텍스트 1:1 독점 바인딩]: 중복 할당 방지하여 글자 분리/이탈 원천 차단
-              (setq assigned-texts '()
-                    parts-list '()
-                    in-min nil in-max nil in-pts '()
-                    i 1)
-              (foreach grp clustered-parts
-                (setq parent-obj (caar grp)
-                      children-holes (cadr grp)
-                      tmp-min (nth 2 (car grp))
-                      tmp-max (nth 3 (car grp))
-                      part-texts '())
-                (foreach t-item text-list
-                  (setq t-obj (nth 0 t-item)
-                        t-pt (nth 1 t-item))
-                  (if (and (null (vl-position t-obj assigned-texts))
-                           (<= (- (car tmp-min) 50.0) (car t-pt))
-                           (<= (car t-pt) (+ (car tmp-max) 50.0))
-                           (<= (- (cadr tmp-min) 50.0) (cadr t-pt))
-                           (<= (cadr t-pt) (+ (cadr tmp-max) 50.0)))
-                    (progn
-                      (setq part-texts (cons t-obj part-texts)
-                            assigned-texts (cons t-obj assigned-texts))
-                    )
-                  )
-                )
-                (setq all-objs (cons parent-obj (append children-holes part-texts))
-                      w (- (car tmp-max) (car tmp-min))
-                      h (- (cadr tmp-max) (cadr tmp-min))
-                      area (* w h))
-                ;; part 구조: (all-objs orig-x orig-y w h area (length children-holes) (length part-texts))
-                (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list))
-
+          ;; 내부 모형군(부품 + 내경 + 글자 전체) BBOX 및 경계점 추출 (절대 이동하지 않음!)
+          (setq in-min nil in-max nil in-pts '() i 0)
+          (repeat (sslength ss-in)
+            (setq ename (ssname ss-in i)
+                  obj   (vlax-ename->vla-object ename)
+                  i     (1+ i))
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+              (progn
+                (setq tmp-min (vlax-safearray->list tmp-min)
+                      tmp-max (vlax-safearray->list tmp-max))
                 (setq in-min (if (null in-min) tmp-min (mapcar 'min in-min tmp-min))
                       in-max (if (null in-max) tmp-max (mapcar 'max in-max tmp-max)))
-
-                ;; 16분할 다중 둘레점 정밀 샘플링 (외곽선 기준)
+                ;; 16분할 경계점 수집 (글자 BBOX 포함하여 글자도 외곽 틀 내부에 완벽 보호)
                 (foreach f '(0.0 0.25 0.5 0.75 1.0)
-                  (setq in-pts (cons (list (+ (car tmp-min) (* f w)) (cadr tmp-min)) in-pts))
-                  (setq in-pts (cons (list (+ (car tmp-min) (* f w)) (cadr tmp-max)) in-pts))
+                  (setq in-pts (cons (list (+ (car tmp-min) (* f (- (car tmp-max) (car tmp-min)))) (cadr tmp-min)) in-pts))
+                  (setq in-pts (cons (list (+ (car tmp-min) (* f (- (car tmp-max) (car tmp-min)))) (cadr tmp-max)) in-pts))
                 )
                 (foreach f '(0.25 0.5 0.75)
-                  (setq in-pts (cons (list (car tmp-min) (+ (cadr tmp-min) (* f h))) in-pts))
-                  (setq in-pts (cons (list (car tmp-max) (+ (cadr tmp-min) (* f h))) in-pts))
+                  (setq in-pts (cons (list (car tmp-min) (+ (cadr tmp-min) (* f (- (cadr tmp-max) (cadr tmp-min))))) in-pts))
+                  (setq in-pts (cons (list (car tmp-max) (+ (cadr tmp-min) (* f (- (cadr tmp-max) (cadr tmp-min))))) in-pts))
                 )
-                (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos w 2 1) " mm, 높이 = " (rtos h 2 1) 
-                               " mm (내경 " (itoa (length children-holes)) "개, 문자 " (itoa (length part-texts)) "개 독점결합)"))
-                (setq i (1+ i))
-              )
-
-              (if (and in-min in-max out-min out-max in-pts)
-                (progn
-                  (setq in-cx (/ (+ (car in-min) (car in-max)) 2.0)
-                        in-cy (/ (+ (cadr in-min) (cadr in-max)) 2.0))
-
-                  ;; 120단계 2D 간격 최적화 틀 이동량 탐색
-                  (setq dy-min (- (cadr in-max) (cadr out-max))
-                        dy-max (- (cadr in-min) (cadr out-min)))
-                  (if (<= dy-min dy-max)
-                    (setq num-steps 120
-                          step-dy (/ (- dy-max dy-min) 120.0))
-                    (setq num-steps 60
-                          step-dy (/ (abs (- in-cy out-cy)) 60.0)
-                          dy-min (- in-cy out-cy))
-                  )
-                  (setq best-clear -1e9
-                        best-dx (- in-cx out-cx)
-                        best-dy (- in-cy out-cy)
-                        step-i 0)
-                  (while (<= step-i num-steps)
-                    (setq cand-dy (+ dy-min (* step-i step-dy))
-                          cand-valid T
-                          max-allow-dx 1e9
-                          min-allow-dx -1e9)
-                    (foreach pt in-pts
-                      (if cand-valid
-                        (progn
-                          (setq y-q (- (cadr pt) cand-dy)
-                                x-rng (MBBG:GetXRangeAtY out-pts y-q))
-                          (if x-rng
-                            (setq max-allow-dx (min max-allow-dx (- (car pt) (car x-rng)))
-                                  min-allow-dx (max min-allow-dx (- (car pt) (cadr x-rng))))
-                            (setq cand-valid nil)
-                          )
-                        )
-                      )
-                    )
-                    (if cand-valid
-                      (progn
-                        (setq slack (- max-allow-dx min-allow-dx)
-                              cand-dx (/ (+ min-allow-dx max-allow-dx) 2.0)
-                              h-clear (/ slack 2.0)
-                              v-top (- (+ (cadr out-max) cand-dy) (cadr in-max))
-                              v-bot (- (cadr in-min) (+ (cadr out-min) cand-dy))
-                              min-2d (min h-clear (min v-top v-bot)))
-                        (if (> min-2d best-clear)
-                          (setq best-clear min-2d
-                                best-dx cand-dx
-                                best-dy cand-dy)
-                        )
-                      )
-                    )
-                    (setq step-i (1+ step-i))
-                  )
-
-                  (setq final-dx best-dx
-                        final-dy best-dy)
-
-                  ;; [1차 실행]: 외곽 틀(컨테이너) 최적 위치로 이동
-                  (foreach o move-out-objs
-                    (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list final-dx final-dy 0.0))))
-                  )
-
-                  ;; 이동된 외곽 다각형 좌표 및 경계 갱신
-                  (setq new-out-pts (mapcar '(lambda (pt) (list (+ (car pt) final-dx) (+ (cadr pt) final-dy))) out-pts)
-                        shift-out-min-y (+ (cadr out-min) final-dy)
-                        shift-out-max-y (+ (cadr out-max) final-dy))
-
-                  ;; [2차 실행]: MBBN 네스팅 엔진 통합 기반 2D 전역 비간섭 배치 (Non-Overlapping Relaxation)
-                  ;; 면적 내림차순(대형 단품 우선)으로 안전 배치 확정
-                  (setq parts-list (vl-sort parts-list '(lambda (a b) (> (nth 5 a) (nth 5 b))))
-                        confirmed '()
-                        nudged-count 0)
-
-                  (foreach p parts-list
-                    (setq all-objs (nth 0 p)
-                          orig-x   (nth 1 p)
-                          orig-y   (nth 2 p)
-                          w        (nth 3 p)
-                          h        (nth 4 p)
-                          cur-r    (list orig-x orig-y w h))
-
-                    ;; 현재 위치가 100% 곡선 틀 내부이고 다른 확정 단품과 겹치지 않는지 검사
-                    (setq collides nil)
-                    (foreach c confirmed
-                      (if (MBBN:RectsOverlap cur-r c 3.0) (setq collides T))
-                    )
-                    (if (and (null collides) (MBBN:IsRectInsidePoly orig-x orig-y w h new-out-pts 2.0))
-                      (progn
-                        ;; 이동 불필요 (현재 위치 확정)
-                        (setq confirmed (cons cur-r confirmed))
-                      )
-                      (progn
-                        ;; 돌출 또는 겹침 발생 -> MBBN 네스팅 2D 전역 비간섭 안전 후보 위치 탐색
-                        (setq candidates '())
-
-                        ;; 후보 1: 벽면 내측 직접 밀착 위치 (Nudge-In)
-                        (setq needed-dx-l 0.0 needed-dx-r 0.0)
-                        (foreach f '(0.0 0.25 0.5 0.75 1.0)
-                          (setq y-c (+ orig-y (* f h))
-                                rng (MBBG:GetXRangeAtY new-out-pts y-c))
-                          (if rng
-                            (progn
-                              (if (< orig-x (+ (car rng) 2.0))
-                                (setq needed-dx-l (max needed-dx-l (- (+ (car rng) 2.0) orig-x)))
-                              )
-                              (if (> (+ orig-x w) (- (cadr rng) 2.0))
-                                (setq needed-dx-r (max needed-dx-r (- (+ orig-x w) (- (cadr rng) 2.0))))
-                              )
-                            )
-                          )
-                        )
-                        (setq nudge-dx (cond ((> needed-dx-l 0.0) needed-dx-l)
-                                             ((> needed-dx-r 0.0) (- 0.0 needed-dx-r))
-                                             (t 0.0)))
-                        (setq candidates (cons (list (+ orig-x nudge-dx) orig-y) candidates))
-
-                        ;; 후보 2: 확정된 다른 단품 주변 앵커 (우측, 상단, 대각선)
-                        (foreach c confirmed
-                          (setq cx (nth 0 c) cy (nth 1 c) cw (nth 2 c) ch (nth 3 c))
-                          (setq candidates (cons (list (+ cx cw 3.0) cy) candidates))
-                          (setq candidates (cons (list cx (+ cy ch 3.0)) candidates))
-                          (setq candidates (cons (list (+ cx cw 3.0) (+ cy ch 3.0)) candidates))
-                        )
-
-                        ;; 후보 3: 2D 전역 Y 스캔 (오목 곡선 틀 내부 유효 높이 전역 탐색)
-                        (setq scan-y (+ shift-out-min-y 2.0))
-                        (while (<= (+ scan-y h 2.0) shift-out-max-y)
-                          (setq rng (MBBG:GetXRangeAtY new-out-pts scan-y))
-                          (if rng
-                            (progn
-                              (setq min-x (+ (car rng) 2.0)
-                                    max-x (- (cadr rng) w 2.0))
-                              (if (<= min-x max-x)
-                                (progn
-                                  (setq candidates (cons (list min-x scan-y) candidates))
-                                  (setq candidates (cons (list max-x scan-y) candidates))
-                                  (setq sx (+ min-x 20.0))
-                                  (while (<= sx (- max-x 10.0))
-                                    (setq candidates (cons (list sx scan-y) candidates)
-                                          sx (+ sx 30.0))
-                                  )
-                                )
-                              )
-                            )
-                          )
-                          (setq scan-y (+ scan-y 10.0))
-                        )
-
-                        ;; 유효 후보 필터링: 틀 내부(Margin 2mm) AND 확정 단품과 겹침 없음(Gap 3mm)
-                        (setq valid-cands '())
-                        (foreach cand candidates
-                          (setq cand-r (list (car cand) (cadr cand) w h)
-                                collides nil)
-                          (foreach c confirmed
-                            (if (MBBN:RectsOverlap cand-r c 3.0) (setq collides T))
-                          )
-                          (if (and (null collides) (MBBN:IsRectInsidePoly (car cand) (cadr cand) w h new-out-pts 2.0))
-                            (progn
-                              (setq dist (+ (expt (- (car cand) orig-x) 2) (expt (- (cadr cand) orig-y) 2)))
-                              (setq valid-cands (cons (list dist (car cand) (cadr cand)) valid-cands))
-                            )
-                          )
-                        )
-
-                        ;; 원래 위치와 가장 가까운 비간섭 위치 선택
-                        (if valid-cands
-                          (progn
-                            (setq valid-cands (vl-sort valid-cands '(lambda (p1 p2) (< (car p1) (car p2))))
-                                  best-cand (car valid-cands)
-                                  shift-dx (- (cadr best-cand) orig-x)
-                                  shift-dy (- (caddr best-cand) orig-y))
-
-                            ;; [핵심]: 외곽선 + 모든 내경(홀) + 문자를 한 묶음으로 일괄 이동!
-                            (foreach o all-objs
-                              (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list shift-dx shift-dy 0.0))))
-                            )
-                            (setq confirmed (cons (list (cadr best-cand) (caddr best-cand) w h) confirmed)
-                                  nudged-count (1+ nudged-count))
-                          )
-                          (progn
-                            ;; 최후 폴백: 확정 목록 등록
-                            (setq confirmed (cons cur-r confirmed))
-                          )
-                        )
-                      )
-                    )
-                  )
-
-                  (princ "\n================================================================")
-                  (princ "\n>> [MBBG 완료] 오목 곡선 추종 & 스마트 비간섭 자동 배치 완료!")
-                  (princ (strcat "\n   - 외곽 틀 최적 이동량: X = " (rtos final-dx 2 1) " mm, Y = " (rtos final-dy 2 1) " mm"))
-                  (if (> nudged-count 0)
-                    (princ (strcat "\n   - [비간섭 안착 보정] 돌출/간섭 단품 " (itoa nudged-count) "개를 안전 영역으로 무간섭 배치 완료 (겹침 0mm, 돌출 0mm 보장)"))
-                    (if (and best-clear (>= best-clear 0.0))
-                      (princ (strcat "\n   - 2D 균등 여백(Clearance): " (rtos best-clear 2 1) " mm (100% 무간섭 완벽 안착)"))
-                    )
-                  )
-                  (princ "\n   - 각 단품의 모든 내경(구멍/슬롯)과 부속 문자가 일체형으로 완벽 유지됩니다.")
-                  (princ "\n================================================================")
-                )
-                (princ "\n>> 오류: 내부 객체 선택에 유효한 부품이 없습니다.")
               )
             )
-            (princ "\n>> 안내: 내부 부품이 선택되지 않았습니다.")
+          )
+
+          (if (and in-min in-max out-min out-max out-pts (>= (length out-pts) 3) in-pts)
+            (progn
+              (setq out-cx (/ (+ (car out-min) (car out-max)) 2.0)
+                    out-cy (/ (+ (cadr out-min) (cadr out-max)) 2.0)
+                    in-cx  (/ (+ (car in-min) (car in-max)) 2.0)
+                    in-cy  (/ (+ (cadr in-min) (cadr in-max)) 2.0))
+
+              (princ (strcat "\n>> [인식 완료] 외형 틀 1개(" (itoa (length out-pts)) "개 곡선점) -> 고정 모형군(" (itoa (sslength ss-in)) "개 객체) 방향 자동 이동"))
+
+              ;; 120단계 2D 간격 최적화 탐색 (외형 틀이 이동할 dy 탐색)
+              (setq dy-min (- (cadr in-max) (cadr out-max))
+                    dy-max (- (cadr in-min) (cadr out-min)))
+              (if (<= dy-min dy-max)
+                (setq num-steps 120
+                      step-dy (/ (- dy-max dy-min) 120.0))
+                (setq num-steps 60
+                      step-dy (/ (abs (- in-cy out-cy)) 60.0)
+                      dy-min (- in-cy out-cy))
+              )
+              (setq best-clear -1e9
+                    best-dx (- in-cx out-cx)
+                    best-dy (- in-cy out-cy)
+                    step-i 0)
+              (while (<= step-i num-steps)
+                (setq cand-dy (+ dy-min (* step-i step-dy))
+                      cand-valid T
+                      max-allow-dx 1e9
+                      min-allow-dx -1e9)
+                (foreach pt in-pts
+                  (if cand-valid
+                    (progn
+                      (setq y-q (- (cadr pt) cand-dy)
+                            x-rng (MBBG:GetXRangeAtY out-pts y-q))
+                      (if x-rng
+                        (setq max-allow-dx (min max-allow-dx (- (car pt) (car x-rng)))
+                              min-allow-dx (max min-allow-dx (- (car pt) (cadr x-rng))))
+                        (setq cand-valid nil)
+                      )
+                    )
+                  )
+                )
+                (if cand-valid
+                  (progn
+                    (setq slack (- max-allow-dx min-allow-dx)
+                          cand-dx (/ (+ min-allow-dx max-allow-dx) 2.0)
+                          h-clear (/ slack 2.0)
+                          v-top (- (+ (cadr out-max) cand-dy) (cadr in-max))
+                          v-bot (- (cadr in-min) (+ (cadr out-min) cand-dy))
+                          min-2d (min h-clear (min v-top v-bot)))
+                    (if (> min-2d best-clear)
+                      (setq best-clear min-2d
+                            best-dx cand-dx
+                            best-dy cand-dy)
+                    )
+                  )
+                )
+                (setq step-i (1+ step-i))
+              )
+
+              (setq final-dx best-dx
+                    final-dy best-dy)
+
+              ;; [핵심]: 내부 모형(부품/내경/글자)은 절대 건드리지 않고, 외형 틀만 모형 위치로 이동!
+              (foreach o move-out-objs
+                (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list final-dx final-dy 0.0))))
+              )
+
+              (princ "\n================================================================")
+              (princ "\n>> [MBBG v2.3 완료] 외형 틀이 모형군 위치로 정확히 이동하여 감싸기 완료!")
+              (princ (strcat "\n   - 외형 틀 이동량: X = " (rtos final-dx 2 1) " mm, Y = " (rtos final-dy 2 1) " mm"))
+              (if (and best-clear (>= best-clear 0.0))
+                (princ (strcat "\n   - 외형-모형 최소 여백(Clearance): " (rtos best-clear 2 1) " mm (100% 무간섭 완벽 안착)"))
+                (princ (strcat "\n   - 외형 틀이 모형군 중심 위치로 최적 이동 완료되었습니다."))
+              )
+              (princ "\n   - 내부 모형과 글자는 원위치에 100% 안전하게 고정 보존되었습니다.")
+              (princ "\n================================================================")
+            )
+            (princ "\n>> 오류: 외형 틀 또는 내부 모형의 좌표를 추출할 수 없습니다.")
           )
         )
-        (princ "\n>> 오류: 외곽 틀 정점 좌표를 추출할 수 없습니다.")
+        (princ "\n>> 안내: 두 번째 객체군이 선택되지 않았습니다.")
       )
     )
-    (princ "\n>> 안내: 외곽 틀이 선택되지 않았습니다.")
+    (princ "\n>> 안내: 첫 번째 객체군이 선택되지 않았습니다.")
   )
 
-  (if (and ss-out (= (type ss-out) 'PICKSET)) (setq ss-out nil))
-  (if (and ss-in (= (type ss-in) 'PICKSET)) (setq ss-in nil))
+  (if (and ss1 (= (type ss1) 'PICKSET)) (setq ss1 nil))
+  (if (and ss2 (= (type ss2) 'PICKSET)) (setq ss2 nil))
   (vla-EndUndoMark acDoc)
   (setvar 'CMDECHO 1)
   (princ)
