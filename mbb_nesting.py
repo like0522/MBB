@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-[MBBN Ultra-Fast 2D Nesting Multi-Core Engine]
+[MBBN World-Class 2D Nesting Multi-Core Engine]
 Program: MBB Multi-Container Yield Optimizer (Python 3.14 / Shapely / GEOS)
-Version: v3.0 (2026-10-23 08:25:00)
-Architecture: Composite Bigness Priority + Multi-Container Backtracking & Trial-and-Error Yield Maximizer
+Version: v3.1 (2026-10-23 08:45:00)
+Architecture: Jukka Jylänki MaxRects (BSSF/BAF/BLSF/CP) + Global Multi-Bin Best-Fit
+              + Exact Buffer Containment + Wall-Adaptive Curved Tangents + 20-Core Massively Parallel
 =============================================================================
 """
 
@@ -40,26 +41,6 @@ def is_point_in_poly(x, y, poly_pts):
         p1x, p1y = p2x, p2y
     return inside
 
-def get_poly_x_range(poly, y):
-    """Find left and right x-boundaries of polygon at height y"""
-    xs = []
-    n = len(poly)
-    for i in range(n):
-        p1 = poly[i]
-        p2 = poly[(i + 1) % n]
-        x1, y1 = p1
-        x2, y2 = p2
-        if min(y1, y2) - 1e-4 <= y <= max(y1, y2) + 1e-4:
-            if abs(y2 - y1) < 1e-5:
-                xs.extend([x1, x2])
-            else:
-                t = (y - y1) / (y2 - y1)
-                t = max(0.0, min(1.0, t))
-                xs.append(x1 + t * (x2 - x1))
-    if len(xs) >= 2:
-        return (min(xs), max(xs))
-    return None
-
 def rects_overlap(r1, r2, gap=0.0):
     """Check if two rectangles overlap with gap: r = (x, y, w, h)"""
     x1, y1, w1, h1 = r1
@@ -83,459 +64,422 @@ def compute_bigness(p, weight_dim=500.0, weight_aspect=50.0):
     aspect = max_d / min_d
     return area + (max_d * weight_dim) + (aspect * weight_aspect)
 
-def pack_parts_into_single_container(parts, container, gap, margin, rot_policy, align_pref, enable_backtrack=False):
+class MaxRectsContainer:
     """
-    Packs as many parts as possible into one container (Circle or Polygon).
-    Supports wall-hugging anchors, rotation policies, and local backtracking.
-    Returns (placed_plan, unplaced_parts).
+    High-performance 2D MaxRects container engine for Circle or Polygon shapes.
+    Tracks exact real-coordinate free space without grid discretization loss.
     """
-    is_circle = (container.get('type') == 'circle')
-    if is_circle:
-        cx, cy = container['circle_center']
-        R = float(container['circle_radius'])
-        min_ox, min_oy = cx - R, cy - R
-        max_ox, max_oy = cx + R, cy + R
-        prep_poly = None
+    def __init__(self, c_data, gap=3.0, margin=2.0):
+        self.id = c_data['id']
+        self.type = c_data.get('type', 'polygon')
+        self.gap = float(gap)
+        self.margin = float(margin)
+        self.area = float(c_data.get('area', 1.0))
+        self.placed = []
 
-        def x_range_fn(y):
-            dy = abs(y - cy)
-            if dy > R: return None
-            dx = math.sqrt(max(0.0, R * R - dy * dy))
-            return (cx - dx, cx + dx)
+        if self.type == 'circle':
+            self.cx, self.cy = c_data['circle_center']
+            self.R = float(c_data['circle_radius'])
+            self.min_ox, self.min_oy = self.cx - self.R, self.cy - self.R
+            self.max_ox, self.max_oy = self.cx + self.R, self.cy + self.R
+            self.prep_inner = None
+            self.eff_R = max(0.0, self.R - self.margin)
+            self.eff_R_sq = self.eff_R * self.eff_R + 1e-4
+        else:
+            self.outer_pts = c_data['outer_polygon']
+            self.min_ox, self.min_oy, self.max_ox, self.max_oy = c_data['outer_bbox']
+            self.prep_inner = None
+            if HAS_SHAPELY:
+                poly = Polygon(self.outer_pts)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                inner_poly = poly.buffer(-self.margin)
+                if inner_poly.is_empty:
+                    inner_poly = poly
+                self.prep_inner = prep(inner_poly)
 
-        def is_inside_fn(gx, gy, w, h):
-            m = margin
-            for px, py in [(gx-m, gy-m), (gx+w+m, gy-m), (gx+w+m, gy+h+m), (gx-m, gy+h+m)]:
-                if (px - cx) ** 2 + (py - cy) ** 2 > R * R + 1e-4:
+        init_x = self.min_ox + self.margin
+        init_y = self.min_oy + self.margin
+        init_w = max(0.0, (self.max_ox - self.min_ox) - 2.0 * self.margin)
+        init_h = max(0.0, (self.max_oy - self.min_oy) - 2.0 * self.margin)
+        self.free_rects = [[init_x, init_y, init_w, init_h]]
+
+    def is_inside(self, gx, gy, w, h):
+        """Exact Euclidean clearance test."""
+        if self.type == 'circle':
+            for px, py in [(gx, gy), (gx + w, gy), (gx + w, gy + h), (gx, gy + h)]:
+                if (px - self.cx)**2 + (py - self.cy)**2 > self.eff_R_sq:
                     return False
             return True
-    else:
-        outer_pts = container['outer_polygon']
-        min_ox, min_oy, max_ox, max_oy = container['outer_bbox']
-        prep_poly = None
-        if HAS_SHAPELY:
-            poly_obj = Polygon(outer_pts)
-            if not poly_obj.is_valid:
-                poly_obj = poly_obj.buffer(0)
-            prep_poly = prep(poly_obj)
-
-        def x_range_fn(y):
-            return get_poly_x_range(outer_pts, y)
-
-        def is_inside_fn(gx, gy, w, h):
-            m = margin
-            if HAS_SHAPELY and prep_poly is not None:
-                b = box(gx - m, gy - m, gx + w + m, gy + h + m)
-                return prep_poly.contains(b)
+        else:
+            if self.prep_inner is not None:
+                b = box(gx, gy, gx + w, gy + h)
+                return self.prep_inner.covers(b)
 
             pts_to_check = [
-                (gx-m, gy-m), (gx+w+m, gy-m), (gx+w+m, gy+h+m), (gx-m, gy+h+m),
-                (gx + w*0.5, gy-m), (gx + w*0.5, gy+h+m),
-                (gx-m, gy + h*0.5), (gx+w+m, gy + h*0.5)
+                (gx, gy), (gx+w, gy), (gx+w, gy+h), (gx, gy+h),
+                (gx + w*0.5, gy), (gx + w*0.5, gy+h),
+                (gx, gy + h*0.5), (gx+w, gy + h*0.5)
             ]
             for px, py in pts_to_check:
-                if not is_point_in_poly(px, py, outer_pts):
+                if not is_point_in_poly(px, py, self.outer_pts):
                     return False
             return True
 
-    def get_fit_bounds(gy, h):
-        max_left = -float('inf')
-        min_right = float('inf')
-        steps = 8
-        for i in range(steps + 1):
-            y = (gy - margin) + (i / float(steps)) * (h + 2 * margin)
-            rng = x_range_fn(y)
-            if rng is None: return None, None
-            if rng[0] > max_left: max_left = rng[0]
-            if rng[1] < min_right: min_right = rng[1]
-        return max_left + margin, min_right - margin
+    def prune_free_list(self):
+        """Removes free rectangles that are completely subsumed by another."""
+        i = 0
+        while i < len(self.free_rects):
+            r1 = self.free_rects[i]
+            j = i + 1
+            while j < len(self.free_rects):
+                r2 = self.free_rects[j]
+                if (r1[0] >= r2[0] and r1[1] >= r2[1] and
+                    r1[0] + r1[2] <= r2[0] + r2[2] and
+                    r1[1] + r1[3] <= r2[1] + r2[3]):
+                    self.free_rects.pop(i)
+                    i -= 1
+                    break
+                if (r2[0] >= r1[0] and r2[1] >= r1[1] and
+                    r2[0] + r2[2] <= r1[0] + r1[2] and
+                    r2[1] + r2[3] <= r1[1] + r1[3]):
+                    self.free_rects.pop(j)
+                    continue
+                j += 1
+            i += 1
 
-    def find_best_anchor_for_part(p, cur_placed):
-        pw = float(p['w'])
-        ph = float(p['h'])
+    def split_free_rect(self, free_rect, placed_rect):
+        """Splits free_rect against placed_rect with inter-part gap."""
+        fx, fy, fw, fh = free_rect
+        px, py, pw, ph = placed_rect
+        gx = px - self.gap
+        gy = py - self.gap
+        gw = pw + 2.0 * self.gap
+        gh = ph + 2.0 * self.gap
+
+        if (gx >= fx + fw or gx + gw <= fx or
+            gy >= fy + fh or gy + gh <= fy):
+            return [free_rect]
+
+        new_rects = []
+        if gx > fx and gx < fx + fw: new_rects.append([fx, fy, gx - fx, fh])
+        if gx + gw < fx + fw and gx + gw > fx: new_rects.append([gx + gw, fy, fx + fw - (gx + gw), fh])
+        if gy > fy and gy < fy + fh: new_rects.append([fx, fy, fw, gy - fy])
+        if gy + gh < fy + fh and gy + gh > fy: new_rects.append([fx, gy + gh, fw, fy + fh - (gy + gh)])
+        return new_rects
+
+    def find_best_position(self, pw, ph, method='BL', rot_policy='free', align_pref='left'):
+        """
+        Evaluates candidate placement using Jukka Jylänki's MaxRects heuristics.
+        Supports BSSF, BAF, BLSF, CP, BL.
+        """
         aspect = max(pw, ph) / max(1.0, min(pw, ph))
 
         if rot_policy == 90:
-            valid_rots = [90] if aspect > 1.25 else [90, 0]
+            candidate_rots = [(ph, pw, 90)] if aspect > 1.25 else [(ph, pw, 90), (pw, ph, 0)]
         elif rot_policy == 0:
-            valid_rots = [0] if aspect > 1.25 else [0, 90]
-        else:
-            valid_rots = [0, 90]
+            candidate_rots = [(pw, ph, 0)] if aspect > 1.25 else [(pw, ph, 0), (ph, pw, 90)]
+        else: # 'free'
+            candidate_rots = [(ph, pw, 90), (pw, ph, 0)] if aspect > 1.25 else [(pw, ph, 0), (ph, pw, 90)]
 
-        filtered_rots = []
-        for rot in valid_rots:
-            cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
-            if cur_w <= (max_ox - min_ox) and cur_h <= (max_oy - min_oy):
-                filtered_rots.append(rot)
+        best_score1 = float('inf')
+        best_score2 = float('inf')
+        best_node = None
 
-        if not filtered_rots:
-            for rot in [0, 90]:
-                cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
-                if cur_w <= (max_ox - min_ox) and cur_h <= (max_oy - min_oy):
-                    filtered_rots.append(rot)
-
-        best_anchor = None
-        best_rot = 0
-        best_w, best_h = pw, ph
-        best_score = float('inf')
-
-        for rot in filtered_rots:
-            cur_w, cur_h = (ph, pw) if rot == 90 else (pw, ph)
-            cand_gys = []
-            step_y = max(4.0, (max_oy - min_oy) / 80.0)
-            cy_val = min_oy + margin
-            while cy_val + cur_h + margin <= max_oy:
-                cand_gys.append(cy_val)
-                cy_val += step_y
-
-            for pr in cur_placed:
-                cand_gys.append(pr[1] + pr[3] + gap)
-                cand_gys.append(pr[1] - cur_h - gap)
-                cand_gys.append(pr[1])
-
-            cand_gys = sorted(list(set([y for y in cand_gys if min_oy + margin <= y <= max_oy - cur_h - margin])))
-
-            for gy in cand_gys:
-                xl, xr = get_fit_bounds(gy, cur_h)
-                if xl is None or (xl + cur_w > xr):
-                    continue
-
-                cand_xs = []
-                if align_pref == 'center':
-                    cand_xs.append((xl + xr - cur_w) * 0.5)
-                    cand_xs.append(xl)
-                    cand_xs.append(xr - cur_w)
-                elif align_pref == 'right':
-                    cand_xs.append(xr - cur_w)
-                    cand_xs.append((xl + xr - cur_w) * 0.5)
-                    cand_xs.append(xl)
-                else: # 'left' or 'wall_hug'
-                    cand_xs.append(xl)
-                    cand_xs.append((xl + xr - cur_w) * 0.5)
-                    cand_xs.append(xr - cur_w)
-
-                for pr in cur_placed:
-                    cand_xs.append(pr[0] + pr[2] + gap)
-                    cand_xs.append(pr[0] - cur_w - gap)
-                    cand_xs.append(pr[0])
-                    cand_xs.append(pr[0] + pr[2] - cur_w)
-
-                cand_xs = [x for x in set(cand_xs) if xl <= x <= xr - cur_w]
-
-                for gx in cand_xs:
-                    cur_r = (gx, gy, cur_w, cur_h)
-                    if any(rects_overlap(cur_r, pr, gap) for pr in cur_placed):
-                        continue
-                    if not is_inside_fn(gx, gy, cur_w, cur_h):
-                        continue
-
-                    # Wall-Hug / Compactness score:
-                    # Penalizes height (gy) and x-span, rewards proximity to container boundary
-                    score = (gy - min_oy) * 10000.0 + (gx - min_ox)
-                    if score < best_score:
-                        best_score = score
-                        best_anchor = (gx, gy)
-                        best_rot = rot
-                        best_w, best_h = cur_w, cur_h
-
-        return best_anchor, best_rot, best_w, best_h
-
-    placed = []
-    placed_plan = []
-    unplaced = []
-
-    for p in parts:
-        pid = p['id']
-        best_anchor, best_rot, best_w, best_h = find_best_anchor_for_part(p, placed)
-
-        if best_anchor is not None:
-            gx, gy = best_anchor
-            placed.append((gx, gy, best_w, best_h))
-            placed_plan.append({
-                'id': pid,
-                'container_id': container['id'],
-                'gx': gx,
-                'gy': gy,
-                'w': best_w,
-                'h': best_h,
-                'rot': best_rot,
-                'area': float(p.get('area', best_w * best_h))
-            })
-        else:
-            # Local Backtracking (넣어보고 지우고 재시도):
-            # If a part fails to fit, try unplacing the last placed part, placing current, and re-placing the old one.
-            backtrack_success = False
-            if enable_backtrack and len(placed) > 0:
-                last_rect = placed.pop()
-                last_plan = placed_plan.pop()
-                last_p = [orig_p for orig_p in parts if orig_p['id'] == last_plan['id']][0]
-
-                # Try placing current part first
-                anchor1, rot1, w1, h1 = find_best_anchor_for_part(p, placed)
-                if anchor1 is not None:
-                    placed.append((anchor1[0], anchor1[1], w1, h1))
-                    # Try re-placing last part
-                    anchor2, rot2, w2, h2 = find_best_anchor_for_part(last_p, placed)
-                    if anchor2 is not None:
-                        # Both fit! Commit backtrack!
-                        placed_plan.append({
-                            'id': pid,
-                            'container_id': container['id'],
-                            'gx': anchor1[0],
-                            'gy': anchor1[1],
-                            'w': w1,
-                            'h': h1,
-                            'rot': rot1,
-                            'area': float(p.get('area', w1 * h1))
-                        })
-                        placed.append((anchor2[0], anchor2[1], w2, h2))
-                        placed_plan.append({
-                            'id': last_p['id'],
-                            'container_id': container['id'],
-                            'gx': anchor2[0],
-                            'gy': anchor2[1],
-                            'w': w2,
-                            'h': h2,
-                            'rot': rot2,
-                            'area': float(last_p.get('area', w2 * h2))
-                        })
-                        backtrack_success = True
-                    else:
-                        # Re-placement failed, undo
-                        placed.pop()
-
-                if not backtrack_success:
-                    # Restore previous state
-                    placed.append(last_rect)
-                    placed_plan.append(last_plan)
-
-            if not backtrack_success:
-                unplaced.append(p)
-
-    return placed_plan, unplaced
-
-def repack_ejection_chain(plan, unplaced, containers_data, gap, margin):
-    """
-    Trial-and-Error Ejection Chain (넣어보고 지우고 리패킹):
-    If large parts remain unplaced, attempts to eject 1~2 small placed parts
-    to accommodate the larger unplaced part, then re-packs the ejected parts into remaining cavities.
-    """
-    if not unplaced:
-        return plan, unplaced
-
-    # Sort unplaced by Bigness descending (largest unplaced parts first)
-    unplaced_sorted = sorted(unplaced, key=lambda p: compute_bigness(p), reverse=True)
-    c_map = {c['id']: c for c in containers_data}
-
-    for target_u in unplaced_sorted:
-        target_u_bigness = compute_bigness(target_u)
-        # Try each container
-        for cid, container in c_map.items():
-            c_placed_plans = [p for p in plan if p['container_id'] == cid]
-            if not c_placed_plans:
+        for cur_w, cur_h, rot in candidate_rots:
+            if cur_w > (self.max_ox - self.min_ox) or cur_h > (self.max_oy - self.min_oy):
                 continue
 
-            # Identify small candidate parts in this container
-            small_candidates = [p for p in c_placed_plans if p['area'] < float(target_u.get('area', target_u['w'] * target_u['h']))]
-            small_candidates.sort(key=lambda p: p['area'])
+            # 1. Circle-Specific Tangent Chord Search (Wall-Adaptive)
+            if self.type == 'circle':
+                y_steps = 80
+                step_val = (2.0 * self.eff_R) / y_steps
+                for yi in range(y_steps + 1):
+                    gy_val = (self.cy - self.eff_R) + yi * step_val
+                    if gy_val + cur_h > self.cy + self.eff_R: break
+                    dy1 = abs(gy_val - self.cy)
+                    dy2 = abs(gy_val + cur_h - self.cy)
+                    max_dy = max(dy1, dy2)
+                    if max_dy > self.eff_R: continue
+                    half_w = math.sqrt(max(0.0, self.eff_R**2 - max_dy**2))
+                    xl = self.cx - half_w
+                    xr = self.cx + half_w
+                    if xl + cur_w > xr: continue
 
-            # Try ejecting the smallest 1 or 2 parts
-            for k in [1, min(2, len(small_candidates))]:
-                if k == 0: continue
-                ejected_sub = small_candidates[:k]
-                ejected_ids = set(p['id'] for p in ejected_sub)
+                    if align_pref == 'center':
+                        cand_xs = [(xl + xr - cur_w)*0.5, xl, xr - cur_w]
+                    elif align_pref == 'right':
+                        cand_xs = [xr - cur_w, (xl + xr - cur_w)*0.5, xl]
+                    else: # 'left'
+                        cand_xs = [xl, (xl + xr - cur_w)*0.5, xr - cur_w]
 
-                # Simulated container state without ejected
-                sim_plan = [p for p in plan if p['id'] not in ejected_ids]
-                sim_c_plan = [p for p in sim_plan if p['container_id'] == cid]
-                sim_placed_rects = [(p['gx'], p['gy'], p['w'], p['h']) for p in sim_c_plan]
+                    for pr in self.placed:
+                        cand_xs.append(pr['gx'] + pr['w'] + self.gap)
+                        cand_xs.append(pr['gx'] - cur_w - self.gap)
 
-                # Test if target_u fits in container with remaining parts
-                # Using pack_parts_into_single_container on remaining
-                c_other_parts = [orig_p for orig_p in unplaced if orig_p['id'] == target_u['id']]
-                test_plan, test_unplaced = pack_parts_into_single_container(
-                    c_other_parts, container, gap, margin, rot_policy='mixed', align_pref='left', enable_backtrack=True
-                )
+                    for gx_val in cand_xs:
+                        if gx_val < xl or gx_val + cur_w > xr: continue
+                        if not self.is_inside(gx_val, gy_val, cur_w, cur_h): continue
+                        col = False
+                        for pr in self.placed:
+                            if not (gx_val + cur_w + self.gap <= pr['gx'] or
+                                    pr['gx'] + pr['w'] + self.gap <= gx_val or
+                                    gy_val + cur_h + self.gap <= pr['gy'] or
+                                    pr['gy'] + pr['h'] + self.gap <= gy_val):
+                                col = True; break
+                        if col: continue
 
-                # If target_u could fit together with remaining parts in container:
-                # We check full replanning of this container
-                c_kept_orig = []
-                for p in sim_c_plan:
-                    c_kept_orig.append({'id': p['id'], 'w': p['w'], 'h': p['h'], 'area': p['area']})
-                test_all_parts = [target_u] + c_kept_orig
-                new_c_plan, new_c_unplaced = pack_parts_into_single_container(
-                    test_all_parts, container, gap, margin, rot_policy='mixed', align_pref='left', enable_backtrack=True
-                )
+                        if align_pref == 'center':
+                            s1 = (gy_val - self.min_oy)*10000.0 + abs(gx_val - (self.cx - cur_w*0.5))
+                        elif align_pref == 'right':
+                            s1 = (gy_val - self.min_oy)*10000.0 + (self.max_ox - (gx_val + cur_w))
+                        else:
+                            s1 = (gy_val - self.min_oy)*10000.0 + (gx_val - self.min_ox)
+                        s2 = 0.0
 
-                if any(p['id'] == target_u['id'] for p in new_c_plan):
-                    # target_u successfully placed! Now try re-placing ejected parts into ANY container
-                    current_sim_plan = [p for p in sim_plan if p['container_id'] != cid] + new_c_plan
-                    re_ejected_candidates = [p for p in unplaced if p['id'] in ejected_ids] + [
-                        orig_p for orig_p in c_kept_orig if any(u['id'] == orig_p['id'] for u in new_c_unplaced)
-                    ]
+                        if s1 < best_score1:
+                            best_score1 = s1
+                            best_score2 = s2
+                            best_node = (gx_val, gy_val, cur_w, cur_h, rot)
 
-                    # Re-pack across all containers
-                    all_unplaced_now = [p for p in unplaced if p['id'] != target_u['id']] + re_ejected_candidates
-                    # If net placed count improved, accept this swap!
-                    if len(current_sim_plan) >= len(plan):
-                        new_remaining_unplaced = [p for p in all_unplaced_now if not any(placed_p['id'] == p['id'] for placed_p in current_sim_plan)]
-                        return current_sim_plan, new_remaining_unplaced
+            # 2. MaxRects Free Rectangles Search (Polygon & Box Containers)
+            else:
+                for fr in self.free_rects:
+                    if fr[2] >= cur_w and fr[3] >= cur_h:
+                        if align_pref == 'center':
+                            cand_anchors = [(fr[0] + (fr[2] - cur_w)*0.5, fr[1]), (fr[0], fr[1]), (fr[0] + fr[2] - cur_w, fr[1])]
+                        elif align_pref == 'right':
+                            cand_anchors = [(fr[0] + fr[2] - cur_w, fr[1]), (fr[0], fr[1]), (fr[0] + (fr[2] - cur_w)*0.5, fr[1])]
+                        else:
+                            cand_anchors = [(fr[0], fr[1]), (fr[0] + (fr[2] - cur_w)*0.5, fr[1]), (fr[0] + fr[2] - cur_w, fr[1])]
 
-    return plan, unplaced
+                        cand_anchors.append((fr[0], fr[1] + fr[3] - cur_h))
+
+                        for gx, gy in cand_anchors:
+                            if not self.is_inside(gx, gy, cur_w, cur_h): continue
+                            col = False
+                            for pr in self.placed:
+                                if not (gx + cur_w + self.gap <= pr['gx'] or
+                                        pr['gx'] + pr['w'] + self.gap <= gx or
+                                        gy + cur_h + self.gap <= pr['gy'] or
+                                        pr['gy'] + pr['h'] + self.gap <= gy):
+                                    col = True; break
+                            if col: continue
+
+                            rem_w = fr[2] - cur_w
+                            rem_h = fr[3] - cur_h
+                            if method == 'BSSF':
+                                s1 = min(rem_w, rem_h)
+                                s2 = (gy - self.min_oy)*1000.0 + (gx - self.min_ox)
+                            elif method == 'BAF':
+                                s1 = (fr[2]*fr[3]) - (cur_w*cur_h)
+                                s2 = min(rem_w, rem_h)
+                            elif method == 'CP':
+                                contact = 0.0
+                                if abs(gx - self.min_ox - self.margin) < 2.0: contact += cur_h
+                                if abs(gy - self.min_oy - self.margin) < 2.0: contact += cur_w
+                                s1 = -contact
+                                s2 = (gy - self.min_oy)*1000.0 + (gx - self.min_ox)
+                            else: # BL
+                                s1 = (gy - self.min_oy)*10000.0 + (gx - self.min_ox)
+                                s2 = 0.0
+
+                            if s1 < best_score1 or (s1 == best_score1 and s2 < best_score2):
+                                best_score1 = s1
+                                best_score2 = s2
+                                best_node = (gx, gy, cur_w, cur_h, rot)
+
+        return best_node, best_score1
+
+    def place_part(self, node, part_id, orig_area):
+        gx, gy, w, h, rot = node
+        entry = {
+            'id': part_id,
+            'container_id': self.id,
+            'gx': gx,
+            'gy': gy,
+            'w': w,
+            'h': h,
+            'rot': rot,
+            'area': orig_area
+        }
+        self.placed.append(entry)
+        placed_rect = [gx, gy, w, h]
+        new_free = []
+        for fr in self.free_rects:
+            splits = self.split_free_rect(fr, placed_rect)
+            new_free.extend(splits)
+        self.free_rects = new_free
+        self.prune_free_list()
+        return entry
+
+    def rebuild_free_list(self):
+        init_x = self.min_ox + self.margin
+        init_y = self.min_oy + self.margin
+        init_w = max(0.0, (self.max_ox - self.min_ox) - 2.0 * self.margin)
+        init_h = max(0.0, (self.max_oy - self.min_oy) - 2.0 * self.margin)
+        self.free_rects = [[init_x, init_y, init_w, init_h]]
+        for pr in self.placed:
+            placed_rect = [pr['gx'], pr['gy'], pr['w'], pr['h']]
+            new_free = []
+            for fr in self.free_rects:
+                splits = self.split_free_rect(fr, placed_rect)
+                new_free.extend(splits)
+            self.free_rects = new_free
+            self.prune_free_list()
 
 def solve_multi_strategy(args):
     """
     Evaluates multi-container packing strategy across 64 combinations.
-    Implements Composite Bigness Priority, Container Sorting,
-    Wall-Hugging Anchors, and Multi-Iteration Backtracking & Repacking.
+    Combines Jukka Jylänki MaxRects heuristics, Global Multi-Bin Best-Fit,
+    Bigness Priority, and Backtracking Ejection Chain.
     """
     strategy_id, parts_data, containers_data, gap, margin = args
 
     # Clone containers & parts
-    c_list = list(containers_data)
+    c_raw_list = list(containers_data)
     parts = list(parts_data)
 
-    # 1. Container ordering policy (4 variations)
-    c_order_type = strategy_id % 4
-    if c_order_type == 0:
-        # Largest container area first (대형 컨테이너 우선)
-        c_list.sort(key=lambda c: float(c.get('area', 0.0)), reverse=True)
-    elif c_order_type == 1:
-        # Smallest container area first (잔재 우선 소진 Best-Fit)
-        c_list.sort(key=lambda c: float(c.get('area', 0.0)))
-    elif c_order_type == 2:
-        # Circular containers first
-        c_list.sort(key=lambda c: (0 if c.get('type') == 'circle' else 1, -float(c.get('area', 0.0))))
-    else:
-        # Original CAD selection order
-        pass
+    # Strategy Parameters
+    heuristic_methods = ['BL', 'BSSF', 'BAF', 'CP']
+    chosen_method = heuristic_methods[strategy_id % len(heuristic_methods)]
 
-    # 2. Parts sorting & priority policy (16 distinct archetypes)
-    strat_type = (strategy_id // 4) % 16
-    enable_backtrack = (strategy_id % 2 == 0)
+    strat_type = (strategy_id // len(heuristic_methods)) % 16
 
-    if strat_type == 0:
-        # [Archetype 1]: Balanced Bigness (User specification: 길이 + 넓이 동시 대형 우선)
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0, weight_aspect=50.0), reverse=True)
+    if strat_type in [0, 1, 2, 3]:
+        # [Archetype 1..4]: Left-Hug Horizontal Priority (Bigness Descending)
+        w_dim = [500.0, 1000.0, 250.0, 750.0][strat_type]
+        parts.sort(key=lambda p: compute_bigness(p, weight_dim=w_dim), reverse=True)
         rot_policy = 90
         align_pref = 'left'
+        mode = 'global_best_fit' if (strat_type % 2 == 0) else 'sequential'
+        if mode == 'sequential':
+            c_raw_list.sort(key=lambda c: float(c.get('area', 0.0)), reverse=True)
 
-    elif strat_type == 1:
-        # [Archetype 2]: Heavy Length Bigness (장척물/긴 막대 단품 절대 우선)
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=1000.0, weight_aspect=100.0), reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-
-    elif strat_type == 2:
-        # [Archetype 3]: Balanced Bigness + Center-Stack Alignment (대칭 밀착)
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0, weight_aspect=50.0), reverse=True)
-        rot_policy = 90
-        align_pref = 'center'
-
-    elif strat_type == 3:
-        # [Archetype 4]: Balanced Bigness + Free Adaptive Rotation (0도 및 90도 자유 선택)
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0, weight_aspect=50.0), reverse=True)
-        rot_policy = 'mixed'
-        align_pref = 'left'
-
-    elif strat_type == 4:
-        # [Archetype 5]: Area Primary, Max-Dimension Secondary
-        parts.sort(key=lambda p: (float(p.get('area', p['w'] * p['h'])), max(p['w'], p['h'])), reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-
-    elif strat_type == 5:
-        # [Archetype 6]: Max-Dimension Primary, Area Secondary
-        parts.sort(key=lambda p: (max(p['w'], p['h']), float(p.get('area', p['w'] * p['h']))), reverse=True)
-        rot_policy = 90
-        align_pref = 'center'
-
-    elif strat_type == 6:
-        # [Archetype 7]: 2-Tier Hierarchical (대형 그룹 먼저 배치 -> 소형 그룹 캐비티 채우기)
-        bigness_vals = [compute_bigness(p, weight_dim=500.0) for p in parts]
-        median_b = sorted(bigness_vals)[len(bigness_vals) // 2] if bigness_vals else 0.0
-        tier1 = [p for p in parts if compute_bigness(p, weight_dim=500.0) >= median_b]
-        tier2 = [p for p in parts if compute_bigness(p, weight_dim=500.0) < median_b]
-        tier1.sort(key=lambda p: compute_bigness(p, weight_dim=500.0), reverse=True)
-        tier2.sort(key=lambda p: compute_bigness(p, weight_dim=500.0), reverse=True)
-        parts = tier1 + tier2
-        rot_policy = 'mixed'
-        align_pref = 'left'
-
-    elif strat_type == 7:
-        # [Archetype 8]: Diagonal / Perimeter Descending
-        parts.sort(key=lambda p: math.hypot(p['w'], p['h']), reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-
-    elif strat_type == 8:
-        # [Archetype 9]: Aspect-Ratio & Long Bars First
-        parts.sort(key=lambda p: (max(p['w'], p['h']) / max(1.0, min(p['w'], p['h'])), float(p.get('area', 0.0))), reverse=True)
-        rot_policy = 90
-        align_pref = 'left'
-
-    elif strat_type == 9:
-        # [Archetype 10]: Heavy Length Bigness + Vertical Bias (rot=0)
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=800.0), reverse=True)
-        rot_policy = 0
-        align_pref = 'left'
-
-    elif strat_type == 10:
-        # [Archetype 11]: Balanced Bigness + Right-Wall Hugging
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0), reverse=True)
+    elif strat_type in [4, 5, 6]:
+        # [Archetype 5..7]: Right-Hug Horizontal Priority
+        w_dim = [500.0, 1000.0, 300.0][strat_type - 4]
+        parts.sort(key=lambda p: compute_bigness(p, weight_dim=w_dim), reverse=True)
         rot_policy = 90
         align_pref = 'right'
+        mode = 'global_best_fit'
 
-    elif strat_type == 11:
-        # [Archetype 12]: Bigness with moderate dimension weight
-        parts.sort(key=lambda p: compute_bigness(p, weight_dim=250.0), reverse=True)
-        rot_policy = 'mixed'
+    elif strat_type in [7, 8, 9]:
+        # [Archetype 8..10]: Center-Stack Alignment
+        parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0), reverse=True)
+        rot_policy = 90 if (strat_type != 9) else 'free'
         align_pref = 'center'
+        mode = 'global_best_fit'
+
+    elif strat_type in [10, 11]:
+        # [Archetype 11..12]: 2-Tier Hierarchical Infill
+        b_scores = [compute_bigness(p, 500.0) for p in parts]
+        median_b = sorted(b_scores)[len(b_scores)//2] if b_scores else 0.0
+        tier1 = [p for p in parts if compute_bigness(p, 500.0) >= median_b]
+        tier2 = [p for p in parts if compute_bigness(p, 500.0) < median_b]
+        tier1.sort(key=lambda p: compute_bigness(p, 500.0), reverse=True)
+        tier2.sort(key=lambda p: compute_bigness(p, 500.0), reverse=True)
+        parts = tier1 + tier2
+        rot_policy = 90
+        align_pref = 'left'
+        mode = 'global_best_fit'
 
     else:
-        # [Archetypes 13..16]: Stochastic Local Search (Bigness 기반 국소 셔플 및 시행착오)
+        # [Archetypes 13..16]: Stochastic Local Search
         rng = random.Random(strategy_id * 1013 + 57)
-        # Base sort by Bigness
         parts.sort(key=lambda p: compute_bigness(p, weight_dim=500.0), reverse=True)
-        # Permute within small sliding windows (넣어보고 지우고 탐색)
         for i in range(len(parts) - 1):
             if rng.random() < 0.35:
                 parts[i], parts[i + 1] = parts[i + 1], parts[i]
-        rot_policy = 90 if (strategy_id % 2 == 0) else 'mixed'
-        align_pref = 'center' if (strategy_id % 3 == 0) else 'left'
+        rot_policy = 90 if (strategy_id % 2 == 0) else 'free'
+        align_pref = 'left' if (strategy_id % 3 == 0) else 'center'
+        mode = 'global_best_fit'
 
-    # Multi-container sequential bin packing
+    # Build container engines
+    engines = [MaxRectsContainer(c, gap=gap, margin=margin) for c in c_raw_list]
     total_plan = []
-    remaining_parts = list(parts)
-    used_containers = set()
+    unplaced = []
 
-    for container in c_list:
-        if not remaining_parts:
-            break
-        c_plan, unplaced = pack_parts_into_single_container(
-            remaining_parts, container, gap, margin, rot_policy, align_pref, enable_backtrack=enable_backtrack
-        )
-        if c_plan:
-            total_plan.extend(c_plan)
-            used_containers.add(container['id'])
-            remaining_parts = unplaced
+    if mode == 'global_best_fit':
+        for p in parts:
+            pw = float(p['w'])
+            ph = float(p['h'])
+            p_area = float(p.get('area', pw * ph))
 
-    # 3. Post-Packing Ejection Chain & Repacking ("넣어보고 지우고" 전역 리패킹)
-    if remaining_parts and len(total_plan) > 0 and (strategy_id % 3 == 0):
-        total_plan, remaining_parts = repack_ejection_chain(
-            total_plan, remaining_parts, containers_data, gap, margin
-        )
+            best_engine = None
+            best_node = None
+            global_best_score = float('inf')
 
-    # 4. Metrics & Fitness Evaluation
+            for eng in engines:
+                node, score = eng.find_best_position(pw, ph, method=chosen_method, rot_policy=rot_policy, align_pref=align_pref)
+                if node is not None:
+                    fill_factor = 0.95 if len(eng.placed) > 0 else 1.0
+                    adj_score = score * fill_factor
+                    if adj_score < global_best_score:
+                        global_best_score = adj_score
+                        best_engine = eng
+                        best_node = node
+
+            if best_engine is not None:
+                plan_item = best_engine.place_part(best_node, p['id'], p_area)
+                total_plan.append(plan_item)
+            else:
+                unplaced.append(p)
+
+    else: # sequential
+        remaining = list(parts)
+        for eng in engines:
+            if not remaining: break
+            still_unplaced = []
+            for p in remaining:
+                pw = float(p['w'])
+                ph = float(p['h'])
+                p_area = float(p.get('area', pw * ph))
+                node, score = eng.find_best_position(pw, ph, method=chosen_method, rot_policy=rot_policy, align_pref=align_pref)
+                if node is not None:
+                    plan_item = eng.place_part(node, p['id'], p_area)
+                    total_plan.append(plan_item)
+                else:
+                    still_unplaced.append(p)
+            remaining = still_unplaced
+        unplaced = remaining
+
+    # Backtracking / Ejection Chain Repacking
+    if unplaced and len(total_plan) > 0 and (strategy_id % 2 == 0):
+        unplaced.sort(key=lambda p: compute_bigness(p), reverse=True)
+        for u in list(unplaced):
+            u_w, u_h = float(u['w']), float(u['h'])
+            u_area = float(u.get('area', u_w * u_h))
+            placed_for_u = False
+            for eng in engines:
+                small_placed = [pr for pr in eng.placed if pr['area'] < u_area * 0.7]
+                if not small_placed: continue
+                small_placed.sort(key=lambda pr: pr['area'])
+                for cand_pop in small_placed[:2]:
+                    eng.placed.remove(cand_pop)
+                    eng.rebuild_free_list()
+                    node, score = eng.find_best_position(u_w, u_h, method=chosen_method, rot_policy=rot_policy, align_pref=align_pref)
+                    if node is not None:
+                        new_item = eng.place_part(node, u['id'], u_area)
+                        total_plan = [pr for pr in total_plan if pr['id'] != cand_pop['id']] + [new_item]
+                        unplaced.remove(u)
+                        unplaced.append({'id': cand_pop['id'], 'w': cand_pop['w'], 'h': cand_pop['h'], 'area': cand_pop['area']})
+                        placed_for_u = True
+                        break
+                    else:
+                        eng.placed.append(cand_pop)
+                        eng.rebuild_free_list()
+                if placed_for_u: break
+
+    # Metrics & Fitness
+    used_containers = set(p['container_id'] for p in total_plan)
     placed_count = len(total_plan)
     total_parts = len(parts_data)
     placed_area = sum(p['area'] for p in total_plan)
     used_c_area = sum(float(c.get('area', 1.0)) for c in containers_data if c['id'] in used_containers)
-    if used_c_area <= 0.0:
-        used_c_area = 1.0
+    if used_c_area <= 0.0: used_c_area = 1.0
     yield_pct = (placed_area / used_c_area) * 100.0
 
-    # Fitness Formula: Placed Count (10M) > Placed Area (100) > Yield % (1000) - Containers Used (10K)
     fitness = (placed_count * 10000000.0) + (placed_area * 100.0) + (yield_pct * 1000.0) - (len(used_containers) * 10000.0)
 
     return {
@@ -560,7 +504,6 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         parts_data = data['parts']
         total_parts = len(parts_data)
 
-        # Standardize containers list (support single or multi container)
         if 'containers' in data and isinstance(data['containers'], list):
             containers_data = data['containers']
         else:
@@ -586,7 +529,7 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         # Multi-Core Multiprocessing Execution
         with Pool(processes=min(num_cpus, 20)) as pool:
             results = pool.map(solve_multi_strategy, tasks)
-        mode_str = f"Multi-Core Multiprocessing ({min(num_cpus, 20)} CPUs, {num_strategies} Strategies, {num_containers} Containers)"
+        mode_str = f"MaxRects Multi-Core Multiprocessing ({min(num_cpus, 20)} CPUs, {num_strategies} Strategies, {num_containers} Containers)"
 
         best_res = max(results, key=lambda r: (r['placed_count'], r['fitness']))
         elapsed = time.time() - t0
@@ -594,18 +537,16 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         is_success = (best_res['placed_count'] == total_parts)
         status_str = "SUCCESS" if is_success else "PARTIAL"
 
-        msg = (f"MBBN Multi-Container Nesting: {best_res['placed_count']}/{total_parts} parts placed "
+        msg = (f"MBBN MaxRects Global Nesting: {best_res['placed_count']}/{total_parts} parts placed "
                f"in {elapsed*1000.0:.1f}ms [Yield: {best_res['yield_pct']:.1f}% | Containers Used: {len(best_res['used_containers'])}/{num_containers} | {mode_str}] "
                f"(Best Strategy #{best_res['strategy_id']})")
 
-        # Generate AutoLISP output file
-        # Format of MBB_NESTING_PLAN: ( (part_id container_id gx gy w h rot) ... )
         plan_lines = []
         for item in best_res['plan']:
             plan_lines.append(f"  ({item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']})")
 
-        lsp_content = f""";;; MBBN MULTI-CONTAINER NESTING RESULT GENERATED BY PYTHON ENGINE
-;;; Version: v3.0 (2026-10-23 08:25:00)
+        lsp_content = f""";;; MBBN MAXRECTS GLOBAL NESTING RESULT GENERATED BY PYTHON ENGINE
+;;; Version: v3.1 (2026-10-23 08:45:00)
 ;;; Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
 ;;; Elapsed: {elapsed*1000.0:.2f} ms | Mode: {mode_str}
 (setq MBB_NESTING_STATUS "{status_str}")

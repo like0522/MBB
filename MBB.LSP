@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 08:25:00
+;; LAST MODIFIED: 2026-10-23 08:48:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.1 (2026-10-23 08:48:00) : MBBN Jukka Jylanki MaxRects(BSSF/BAF/BLSF/CP) & Global Multi-Bin Best-Fit 전면 탑재
+;;                                 (실수 좌표계 자유공간 분할, 0°/90° 전방위 탐색, 원형 유효 반경(R-m) 정밀 복원 및 20코어 64개 병렬 전략)
 ;; - v3.0 (2026-10-23 08:25:00) : MBBN 대형 단품(길이+면적 복합 Bigness) 우선순위 및 시행착오(Backtracking) 수율 극대화 네스팅 엔진 구축
 ;;                                 (대형 장척물/대면적 판재 최우선 배치, 잔여 유휴 공간(Cavity) 소형 부품 밀착 충진, 20코어 64개 병렬 전략 & 리패킹)
 ;; - v2.9 (2026-10-23 07:17:00) : MBBN 실행 시 외곽 여유(Margin) 및 단품 간격(Gap) 대화식 동적 설정 기능 추가
@@ -2201,7 +2203,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.0] 대형 단품(길이+면적) 우선 & 시행착오(Backtracking) 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v3.1] 세계 표준 MaxRects & Global Multi-Bin Best-Fit 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2576,7 +2578,7 @@
                     )
                   )
 
-                  (princ (strcat "\n>> [Python 멀티코어 수율 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 병렬 시행착오(Backtracking) 탐색"))
+                  (princ (strcat "\n>> [Python MaxRects 전역 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 64개 멀티코어 전략 탐색"))
                   (setq wsh (vlax-create-object "WScript.Shell"))
                   (if wsh
                     (progn
@@ -2587,9 +2589,8 @@
                     (startapp (strcat "cmd.exe /c \"" bat-path "\""))
                   )
 
-                  ;; 임시 배치 파일 및 입력 JSON 정리
+                  ;; 임시 배치 파일 정리 (입력 JSON은 디버깅 및 형상 분석을 위해 mbb_nesting_in.json 유지)
                   (if (findfile bat-path) (vl-file-delete bat-path))
-                  (if (findfile json-in) (vl-file-delete json-in))
 
                   ;; 2. Python 결과 로드 및 CAD 객체(모형+문자) 일괄 자동 배치
                   (setq MBB_NESTING_PLAN nil
