@@ -1746,12 +1746,14 @@
           x1 (car p1)
           x2 (car p2)
           i  (1+ i))
-    ;; 부동소수점 오차 방어 1e-3 fuzz
-    (if (and (<= (- (min y1 y2) 1e-3) y) (<= y (+ (max y1 y2) 1e-3)))
-      (if (equal y1 y2 1e-4)
+    ;; 부동소수점 오차 방어 1e-2 fuzz
+    (if (and (<= (- (min y1 y2) 1e-2) y) (<= y (+ (max y1 y2) 1e-2)))
+      (if (< (abs (- y2 y1)) 1e-3)
         (setq xs (cons x1 (cons x2 xs)))
         (progn
           (setq t-val (/ (- y y1) (- y2 y1)))
+          ;; 선분 범위 강제 클램핑 [0.0, 1.0]
+          (setq t-val (max 0.0 (min 1.0 t-val)))
           (setq xs (cons (+ x1 (* t-val (- x2 x1))) xs))
         )
       )
@@ -1763,11 +1765,12 @@
   )
 )
 
-;; 직사각형 [rx, ry, rw, rh] 가 외곽 다각형 poly 내부에 완전히 포함되는지 검사 (margin 고려)
+;; 직사각형 [rx, ry, rw, rh] 가 외곽 다각형 poly 내부에 완전히 포함되는지 검사 (0.5mm 경계 퍼즈 방어)
 (defun MBBN:IsRectInsidePoly ( rx ry rw rh poly margin / ok f y-c rng p-min-y p-max-y )
   (setq p-min-y (apply 'min (mapcar 'cadr poly))
         p-max-y (apply 'max (mapcar 'cadr poly)))
-  (if (or (< (- ry margin) p-min-y) (> (+ ry rh margin) p-max-y))
+  ;; 상하 경계 0.5mm 퍼즈 허용
+  (if (or (< (- ry margin) (- p-min-y 0.5)) (> (+ ry rh margin) (+ p-max-y 0.5)))
     nil
     (progn
       (setq ok T)
@@ -1776,9 +1779,10 @@
           (progn
             (setq y-c (+ ry (* f rh))
                   rng (MBBG:GetXRangeAtY poly y-c))
+            ;; 좌우 경계 0.5mm 퍼즈 허용
             (if (or (null rng)
-                    (< (- rx margin) (car rng))
-                    (> (+ rx rw margin) (cadr rng)))
+                    (< (- rx margin) (- (car rng) 0.5))
+                    (> (+ rx rw margin) (+ (cadr rng) 0.5)))
               (setq ok nil)
             )
           )
@@ -1790,7 +1794,6 @@
 )
 
 ;; 두 직사각형 충돌(간섭) 검사 (gap 고려)
-;; r1 = (x y w h), r2 = (x y w h)
 (defun MBBN:RectsOverlap ( r1 r2 gap / x1 y1 w1 h1 x2 y2 w2 h2 )
   (setq x1 (nth 0 r1) y1 (nth 1 r1) w1 (nth 2 r1) h1 (nth 3 r1)
         x2 (nth 0 r2) y2 (nth 1 r2) w2 (nth 2 r2) h2 (nth 3 r2))
@@ -1829,7 +1832,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v1.6] 외곽 모형 이동 & 2D 수치해석 정밀 최적 배치")
+  (princ "\n[MBBG v1.7] 외곽 모형 이동 & 2D 수치해석 정밀 최적 배치")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 형상 객체 선택
@@ -1850,7 +1853,7 @@
                   out-max (if (null out-max) tmp-max (mapcar 'max out-max tmp-max)))
           )
         )
-        ;; 외곽 정점 좌표 추출 (vlax-get 우선, vla-get-Coordinates 보조 이중 방어)
+        ;; 외곽 정점 좌표 추출
         (setq p1 nil)
         (if (vlax-property-available-p obj 'Coordinates)
           (setq p1 (vl-catch-all-apply 'vlax-get (list obj 'Coordinates)))
@@ -2006,19 +2009,16 @@
   (princ)
 )
 
-;;; [MBBN] 그리드 세분화 모형 자동 배열 & 2D Nesting 알고리즘
-;;; - 선택된 부품 형상과 부속 문자를 1:1 세트로 자동 인식
-;;; - 외곽 다각형 내부를 미세 그리드로 분할 스캔하여 최적의 위치에 자동 안착
-;;; - 부품 간 간격(gap=5mm), 외곽선 여유(margin=5mm), 0/90도 자동 회전 지원
+;;; [MBBN] 그리드 세분화 모형 자동 배열 & 2D Nesting 알고리즘 (v1.7)
 ;;; =============================================================================
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   out-min out-max out-pts p1 p2
                   geom-list text-list parts-list
                   tmp-min tmp-max b-min b-max w h
-                  t-pt best-plan placed strats strat
+                  t-pt best-plan placed strats strat cur-plan
                   grid-step gap margin out-min-x out-max-x out-min-y out-max-y
                   y-steps x-steps yi xi gy gx cur-r collides found all-ok
-                  all-placed item geom text-objs all-objs rot orig-min orig-w orig-h
+                  item geom text-objs all-objs rot orig-min orig-w orig-h
                   move-dx move-dy )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
@@ -2040,7 +2040,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v1.6] 그리드 세분화 모형 자동 배열 & 2D Nesting")
+  (princ "\n[MBBN v1.7] 그리드 세분화 모형 자동 배열 & 2D Nesting")
   (princ "\n================================================================")
 
   ;; 1단계: 외곽 컨테이너 다각형 선택
@@ -2081,6 +2081,9 @@
 
       (if (and out-min out-max out-pts (>= (length out-pts) 3))
         (progn
+          (princ (strcat "\n>> [외곽 규격] 폭 = " (rtos (- (car out-max) (car out-min)) 2 1) 
+                         " mm, 높이 = " (rtos (- (cadr out-max) (cadr out-min)) 2 1) " mm"))
+
           ;; 2단계: 배치할 내부 부품 및 문자 드래그 선택
           (princ "\n>> [2단계] 배치할 내부 부품 및 문자 전체 드래그 선택: ")
           (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
@@ -2104,7 +2107,7 @@
               )
 
               ;; 부품 형상과 부속 문자 자동 1:1 그루핑
-              (setq parts-list '())
+              (setq parts-list '() i 1)
               (foreach g geom-list
                 (setq geom (nth 0 g)
                       b-min (nth 1 g)
@@ -2114,24 +2117,26 @@
                       text-objs '())
                 (foreach t-item text-list
                   (setq t-pt (nth 1 t-item))
-                  ;; 부품 BBOX 내부 또는 30mm 인접 문자를 부속 문자로 식별
-                  (if (and (<= (- (car b-min) 30.0) (car t-pt))
-                           (<= (car t-pt) (+ (car b-max) 30.0))
-                           (<= (- (cadr b-min) 30.0) (cadr t-pt))
-                           (<= (cadr t-pt) (+ (cadr b-max) 30.0)))
+                  ;; 부품 BBOX 내부 또는 50mm 인접 문자를 부속 문자로 식별
+                  (if (and (<= (- (car b-min) 50.0) (car t-pt))
+                           (<= (car t-pt) (+ (car b-max) 50.0))
+                           (<= (- (cadr b-min) 50.0) (cadr t-pt))
+                           (<= (cadr t-pt) (+ (cadr b-max) 50.0)))
                     (setq text-objs (cons (nth 0 t-item) text-objs))
                   )
                 )
-                ;; (geom-obj, text-objs, all-objs, b-min, b-max, w, h)
-                (setq parts-list (cons (list geom text-objs (cons geom text-objs) b-min b-max w h) parts-list))
+                (princ (strcat "\n   - [부품 " (itoa i) "] 폭 = " (rtos w 2 1) " mm, 높이 = " (rtos h 2 1) " mm (문자 " (itoa (length text-objs)) "개 동반)"))
+                (setq parts-list (cons (list geom text-objs (cons geom text-objs) b-min b-max w h) parts-list)
+                      i (1+ i))
               )
 
               (if parts-list
                 (progn
-                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 부품 인식 완료. 그리드 세분화 네스팅 연산 중..."))
-                  (setq gap 5.0
-                        margin 5.0
-                        grid-step 5.0
+                  (princ (strcat "\n>> 총 " (itoa (length parts-list)) "개 부품 인식 완료. 2mm 정밀 그리드 네스팅 연산 시작..."))
+                  ;; 마진 2mm, 간격 3mm, 그리드 스텝 2mm (초정밀 밀착 네스팅)
+                  (setq gap 3.0
+                        margin 2.0
+                        grid-step 2.0
                         out-min-x (car out-min)
                         out-max-x (car out-max)
                         out-min-y (cadr out-min)
@@ -2224,8 +2229,8 @@
                       )
                       (princ "\n================================================================")
                       (princ (strcat "\n>> [MBBN 완료] 총 " (itoa (length best-plan)) "개 부품 그리드 세분화 자동 배열 완료!"))
-                      (princ "\n   - 부품 간격(Gap): 5.0 mm / 외곽 여유(Margin): 5.0 mm 확보")
-                      (princ "\n   - 부품과 부속 문자가 원형을 유지하며 100% 외곽선 내부에 안착되었습니다.")
+                      (princ (strcat "\n   - 부품 간격(Gap): " (rtos gap 2 1) " mm / 외곽 마진(Margin): " (rtos margin 2 1) " mm"))
+                      (princ "\n   - 부품과 부속 문자가 원형을 유지하며 100% 외곽선 내부에 완벽 안착되었습니다.")
                       (princ "\n================================================================")
                     )
                     (princ "\n>> 오류: 외곽 컨테이너 공간이 협소하여 모든 부품을 배치할 수 없습니다.")
