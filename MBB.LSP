@@ -1,43 +1,26 @@
 ;; =============================================================================
 
+;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-
-;; Modified & Optimized by AI Assistant (2026-04-06 - Potential Error Proofing)
-
-;; =============================================================================
-
-;; 
-
-;;[통합 사용 설명서]
-
-;; 
-
-;; 1. MBB  (전체 통합 모드) - 열린 도형은 사각만 제도, 닫힌 도형은 전체 정보 표기
-
-;; 2. MBB1 (개별 부품별 모드)
-
-;; 3. MBB2 (WCS 여유폭 5mm 모드)
-
-;; 4. MBBC  (최소 외접원) / MBBCI (최대 내접원) / MBBW (무게중심)
-
-;; 5. PCLOSE (폴리선 닫기)
-
+;; LAST MODIFIED: 2026-10-22 18:41:30
+;; ENCODING: ANSI (CP949)
 ;;
-
-;; [필터링 안내]
-
-;; - 모든 명령은 객체 선택 시 '글자(TEXT/MTEXT), 치수, 해치' 등을 자동으로 무시합니다.
-
-;; - 오직 순수 도형(선, 폴리선, 원, 호, 스플라인 등)만을 계산 면적으로 인식합니다.
-
+;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v1.0 (2026-04-06 00:00:00) : 최초 MBB 바운딩 박스 & 형상 분석기 안정화
+;; - v1.1 (2026-09-12 13:48:40) : ExtractPoints 무손실 추출 및 직교 스냅 필터 적용
+;; - v1.2 (2026-10-22 18:41:30) : MBBG 신규 추가 (문자 제외 순수 기하 기준 외곽 균등 여백 자동 배치)
 ;; =============================================================================
-
-
-
-;; =============================================================================
-
-;; 1. [MBB] 통합 경계 사각 (전체 묶음 / 자동 구멍 / 열린 도형 사각만 제도 추가)
-
+;;
+;; [명령어 구성]
+;; 1. MBB   : 전체 형상 단일 최소사각박스 산출 및 중량/수율
+;; 2. MBB1  : 개별 부품별 바운딩 박스
+;; 3. MBB2  : WCS + 5mm 여유 바운딩 박스
+;; 4. MBBC  : 최소 외접원 (Min Bounding Circle)
+;; 5. MBBCI : 최대 내접원 (Max Inscribed Circle)
+;; 6. MBBW  : 도심(Centroid) 및 순중량 산출
+;; 7. PCLOSE: 폴리선 자동 닫기
+;; 8. MBBG  : 외곽 틀 내부 균등 여백 자동 배치 (문자 제외 순수 기하 기준)
+;; 9. MBBUI : DCL 통합 인터페이스 창 실행
 ;; =============================================================================
 
 (defun c:MBB ( / sel i obj ename all-objs
@@ -194,7 +177,7 @@
 
                     (setq final-w wcs-w final-h wcs-h final-area wcs-area final-ang 0.0 final-cen wcs-cen)
 
-                    (if (< rot-area (* wcs-area 0.999))
+                    (if (and (< rot-area (* wcs-area 0.985)) (/= final-ang 0.0))
 
                         (setq final-w rot-w final-h rot-h final-area rot-area final-ang best-ang final-cen rot-cen)
 
@@ -390,7 +373,7 @@
 
                         (setq final-w wcs-w final-h wcs-h final-area wcs-area final-ang 0.0 final-cen wcs-cen)
 
-                        (if (< rot-area (* wcs-area 0.999)) (setq final-w rot-w final-h rot-h final-area rot-area final-ang best-ang final-cen rot-cen))
+                        (if (and (< rot-area (* wcs-area 0.985)) (/= final-ang 0.0)) (setq final-w rot-w final-h rot-h final-area rot-area final-ang best-ang final-cen rot-cen))
 
 
 
@@ -1302,7 +1285,7 @@
 
     
 
-    (setq str (strcat thk-str "tx" (rtos L_val 2 0) "x" (rtos W_val 2 0) "-1EA (N:" (rtos net-wt 2 1) "kg / B:" (rtos box-wt 2 1) "kg / YIELD: " (rtos yield 2 1) "%)"))
+    (setq str (strcat thk-str "tx" (itoa (fix (+ L_val 0.5))) "x" (itoa (fix (+ W_val 0.5))) "-1EA (N:" (rtos net-wt 2 1) "kg / B:" (rtos box-wt 2 1) "kg / YIELD: " (rtos yield 2 1) "%)"))
 
     
 
@@ -1361,67 +1344,54 @@
         )
 
         ((wcmatch objType "AcDbPolyline,AcDb2dPolyline")
-
-            (setq end-param (vlax-curve-getEndParam obj))
-
-            (if (and end-param (numberp end-param) (> end-param 0.0))
-
+            ;; 1. 모든 정점 좌표를 vla-get-Coordinates로 100% 무손실 직접 추출
+            (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
                 (progn
-
-                    (setq param 0)
-
-                    (repeat (fix end-param)
-
-                        (setq p1 (vlax-curve-getPointAtParam obj param))
-
-                        (if p1 (setq pts (cons (list (car p1) (cadr p1)) pts)))
-
-                        (if (and (not (vl-catch-all-error-p (setq b-val (vl-catch-all-apply 'vla-getBulge (list obj param))))) b-val (/= 0.0 b-val))
-
-                            (progn
-
-                                (setq ll (vlax-curve-getDistAtParam obj param) ur (vlax-curve-getDistAtParam obj (1+ param)))
-
-                                (if (and ll ur (> ur ll))
-
-                                    (progn
-
-                                        (setq inc (/ (- ur ll) 20.0))
-
-                                        (setq i (+ ll inc))
-
-                                        (while (< i ur) 
-
-                                            (setq p2 (vlax-curve-getPointAtDist obj i))
-
-                                            (if p2 (setq pts (cons (list (car p2) (cadr p2)) pts)))
-
-                                            (setq i (+ i inc))
-
-                                        )
-
-                                    )
-
-                                )
-
-                            )
-
-                        )
-
-                        (setq param (1+ param))
-
+                    (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
+                    (while p2
+                        (setq pts (cons (list (car p2) (cadr p2)) pts))
+                        (setq p2 (cddr p2))
                     )
-
-                    (setq p1 (vlax-curve-getEndPoint obj))
-
-                    (if p1 (setq pts (cons (list (car p1) (cadr p1)) pts)))
-
                 )
-
             )
-
+            ;; 2. 곡률(Bulge) 구간 안전 보간
+            (setq end-param (vlax-curve-getEndParam obj))
+            (if (and end-param (numberp end-param) (> end-param 0.0))
+                (progn
+                    (setq param 0)
+                    (repeat (fix end-param)
+                        (if (and (not (vl-catch-all-error-p (setq b-val (vl-catch-all-apply 'vla-getBulge (list obj param)))))
+                                 b-val (/= 0.0 b-val))
+                            (if (and (not (vl-catch-all-error-p (setq ll (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj param)))))
+                                     (not (vl-catch-all-error-p (setq ur (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (1+ param))))))
+                                     ll ur (> ur ll))
+                                (progn
+                                    (setq inc (/ (- ur ll) 20.0))
+                                    (setq i (+ ll inc))
+                                    (while (< i ur)
+                                        (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj i)))))
+                                            (if p2 (setq pts (cons (list (car p2) (cadr p2)) pts)))
+                                        )
+                                        (setq i (+ i inc))
+                                    )
+                                )
+                            )
+                        )
+                        (setq param (1+ param))
+                    )
+                )
+            )
+            ;; 3. BoundingBox 4개 극점을 안전 가드로 추가하여 박스가 모형을 파고들지 않도록 방어
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'll 'ur))))
+                (progn
+                    (setq p1 (vlax-safearray->list ll) p3 (vlax-safearray->list ur))
+                    (setq pts (cons (list (car p1) (cadr p1))
+                              (cons (list (car p3) (cadr p1))
+                              (cons (list (car p3) (cadr p3))
+                              (cons (list (car p1) (cadr p3)) pts)))))
+                )
+            )
         )
-
         ((eq objType "AcDbLine")
 
              (setq pts (mapcar '(lambda (p) (list (car p) (cadr p))) (list (vlax-curve-getStartPoint obj) (vlax-curve-getEndPoint obj))))
@@ -1470,28 +1440,30 @@
 
 (defun MBB:CrossProduct ( o a b ) (- (* (- (car a) (car o)) (- (cadr b) (cadr o))) (* (- (cadr a) (cadr o)) (- (car b) (car o)))))
 
-(defun MBB:FindBestAngle ( pts / i p1 p2 ang pts-rot min-x max-x min-y max-y w h area min-area best-ang )
-
+(defun MBB:FindBestAngle ( pts / i p1 p2 ang pts-rot min-x max-x min-y max-y w h area min-area best-ang ang-deg ang-mod )
     (setq min-area 1e308 best-ang 0.0 i 0)
-
     (repeat (length pts)
-
-        (setq p1 (nth i pts) p2 (nth (rem (1+ i) (length pts)) pts) ang (angle p1 p2) pts-rot (MBB:RotatePoints pts (- ang)))
-
+        (setq p1 (nth i pts) p2 (nth (rem (1+ i) (length pts)) pts) ang (angle p1 p2))
+        ;; 직교 축(0, 90, 180, 270도)과 3도(약 0.052 rad) 이내의 미세한 각도는 0도로 스냅
+        (setq ang-deg (* (/ ang pi) 180.0))
+        (setq ang-mod (rem ang-deg 90.0))
+        (if (or (< ang-mod 3.0) (> ang-mod 87.0))
+            (setq ang 0.0)
+        )
+        (setq pts-rot (MBB:RotatePoints pts (- ang)))
         (setq min-x (car (nth 0 pts-rot)) max-x min-x min-y (cadr (nth 0 pts-rot)) max-y min-y)
-
         (foreach p pts-rot (setq min-x (min min-x (car p)) max-x (max max-x (car p)) min-y (min min-y (cadr p)) max-y (max max-y (cadr p))))
-
         (setq w (- max-x min-x) h (- max-y min-y) area (* w h))
-
         (if (< area min-area) (setq min-area area best-ang ang))
-
         (setq i (1+ i))
-
     )
-
+    ;; 최종 best-ang도 직교 스냅 재확인
+    (setq ang-deg (* (/ best-ang pi) 180.0))
+    (setq ang-mod (rem ang-deg 90.0))
+    (if (or (< ang-mod 3.0) (> ang-mod 87.0))
+        (setq best-ang 0.0)
+    )
     best-ang
-
 )
 
 (defun MBB:RotatePoints ( pts ang / cos-a sin-a x y )
@@ -1732,7 +1704,9 @@
 
 (princ "\n  6. MBBW   : 도형의 무게 중심 (Centroid) 표시")
 
-(princ "\n  7. PCLOSE : 
+(princ "\n  7. PCLOSE : 폴리선 닫기
+  8. MBBG   : 외곽 틀 내부 균등 여백 자동 배치 (문자 제외 순수 기하 기준)
+  9. MBBUI  : 
   8. MBBUI  : DCL 통합 관리 창 실행선택한 폴리선/스플라인 강제 닫기 (Close)")
 
 (princ "\n--------------------------------------------------------------------------------")
@@ -1750,6 +1724,140 @@
 ;; =============================================================================
 ;; [MBBUI] 단일 파일 내장 인라인 DCL 대화상자 인터페이스
 ;; =============================================================================
+
+;;; =============================================================================
+;;; [START: CURRENT ACTIVE - v1.2 MODIFIED (2026-10-22 18:41:30)]
+;;; [MBBG] 외곽 기준 모형 내부 균등 여백 자동 배치 (Equal Margin Alignment)
+;;; - 문자는 내부 배치 여백(BBOX) 계산에서 완전히 배제
+;;; - 순수 기하 형상(폴리선/원/선 등)만으로 외곽 여백(Gap X, Gap Y)을 균등 산출
+;;; - 부속 문자(TEXT, MTEXT)는 부품과 함께 동일 벡터로 안전 이동
+;;; =============================================================================
+(defun c:MBBG ( / *error* ss-out ss-in acDoc mspace i ename obj objName
+                  out-min out-max in-min in-max tmp-min tmp-max
+                  out-cx out-cy in-cx in-cy dx dy
+                  gap-x gap-y move-objs )
+  (vl-load-com)
+  (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (setq mspace (vla-get-ModelSpace acDoc))
+
+  ;; 에러 핸들러 및 Undo 트랜잭션 방어
+  (defun *error* ( msg )
+    (if (and acDoc (= 8 (logand 8 (getvar 'UNDOCTL))))
+      (vl-catch-all-apply 'vla-EndUndoMark (list acDoc))
+    )
+    (if (and msg (not (wcmatch (strcase msg t) "*break*,*cancel*,*exit*")))
+      (princ (strcat "\n>> [MBBG 오류]: " msg))
+    )
+    (setvar 'CMDECHO 1)
+    (princ)
+  )
+
+  (setvar 'CMDECHO 0)
+  (vla-StartUndoMark acDoc)
+
+  (princ "\n================================================================")
+  (princ "\n[MBBG] 외곽 모형 내부 균등 여백 자동 배치 (문자 제외 순수 기하 기준)")
+  (princ "\n================================================================")
+
+  ;; 1단계: 외곽 기준 모형 선택
+  (princ "\n>> [1단계] 외곽 기준 모형(컨테이너 틀) 선택: ")
+  (if (setq ss-out (ssget ":S:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
+    (progn
+      (setq out-min nil out-max nil i 0)
+      (repeat (sslength ss-out)
+        (setq ename (ssname ss-out i)
+              obj   (vlax-ename->vla-object ename)
+              i     (1+ i))
+        (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+          (progn
+            (setq tmp-min (vlax-safearray->list tmp-min)
+                  tmp-max (vlax-safearray->list tmp-max))
+            (if (null out-min)
+              (setq out-min tmp-min out-max tmp-max)
+              (setq out-min (mapcar 'min out-min tmp-min)
+                    out-max (mapcar 'max out-max tmp-max))
+            )
+          )
+        )
+      )
+
+      (if (and out-min out-max)
+        (progn
+          (setq out-cx (/ (+ (car out-min) (car out-max)) 2.0)
+                out-cy (/ (+ (cadr out-min) (cadr out-max)) 2.0))
+
+          ;; 2단계: 내부에 배치할 객체들 선택 (부품 + 문자)
+          (princ "\n>> [2단계] 내부에 배치할 부품 및 문자 객체들 모두 선택: ")
+          (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
+            (progn
+              (setq in-min nil in-max nil move-objs '() i 0)
+              (repeat (sslength ss-in)
+                (setq ename (ssname ss-in i)
+                      obj   (vlax-ename->vla-object ename)
+                      objName (vla-get-objectname obj)
+                      move-objs (cons obj move-objs)
+                      i     (1+ i))
+                ;; [규칙]: 문자는 BBOX 여백 계산에서 완전 배제! 순수 기하 객체만 결합 BBOX 계산
+                (if (not (wcmatch (strcase objName) "*TEXT*"))
+                  (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+                    (progn
+                      (setq tmp-min (vlax-safearray->list tmp-min)
+                            tmp-max (vlax-safearray->list tmp-max))
+                      (if (null in-min)
+                        (setq in-min tmp-min in-max tmp-max)
+                        (setq in-min (mapcar 'min in-min tmp-min)
+                              in-max (mapcar 'max in-max tmp-max))
+                      )
+                    )
+                  )
+                )
+              )
+
+              (if (and in-min in-max)
+                (progn
+                  (setq in-cx (/ (+ (car in-min) (car in-max)) 2.0)
+                        in-cy (/ (+ (cadr in-min) (cadr in-max)) 2.0))
+                  ;; 중심 정렬 이동 벡터 (dx, dy)
+                  (setq dx (- out-cx in-cx)
+                        dy (- out-cy in-cy))
+
+                  ;; 좌우 / 상하 남는 여백(Gap) 산출
+                  (setq gap-x (/ (- (- (car out-max) (car out-min)) (- (car in-max) (car in-min))) 2.0)
+                        gap-y (/ (- (- (cadr out-max) (cadr out-min)) (- (cadr in-max) (cadr in-min))) 2.0))
+
+                  ;; 선택된 모든 객체(기하 부품 + 연관 문자)를 일괄 이동
+                  (foreach o move-objs
+                    (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list dx dy 0.0))))
+                  )
+
+                  (princ (strcat "\n>> [MBBG 완료] 총 " (itoa (length move-objs)) "개 객체 균등 배치 완료!"))
+                  (princ (strcat "\n   - 외곽 좌우 균등 여백: " (rtos gap-x 2 1) " mm"))
+                  (princ (strcat "\n   - 외곽 상하 균등 여백: " (rtos gap-y 2 1) " mm"))
+                  (if (or (< gap-x 0.0) (< gap-y 0.0))
+                    (princ "\n   * [주의]: 내부 부품 크기가 외곽 틀보다 큽니다. 간섭을 확인하십시오.")
+                  )
+                )
+                (princ "\n>> 오류: 내부 객체 중 기하 부품(폴리선/선/원 등)을 찾을 수 없습니다.")
+              )
+            )
+            (princ "\n>> 선택 취소: 내부에 배치할 객체가 선택되지 않았습니다.")
+          )
+        )
+        (princ "\n>> 오류: 외곽 기준 모형의 경계를 측정할 수 없습니다.")
+      )
+    )
+    (princ "\n>> 선택 취소: 외곽 기준 모형이 선택되지 않았습니다.")
+  )
+
+  ;; 메모리 해제
+  (setq ss-out nil ss-in nil move-objs nil)
+  (vla-EndUndoMark acDoc)
+  (setvar 'CMDECHO 1)
+  (princ)
+)
+;;; [END: CURRENT ACTIVE - v1.2 MODIFIED (2026-10-22 18:41:30)]
+
+
 (defun c:MBBUI ( / dcl_file fp dcl_id action thk_val )
   (setq dcl_file (vl-filename-mktemp "mbb.dcl"))
   (setq fp (open dcl_file "w"))
@@ -1778,7 +1886,11 @@
   (write-line "  }" fp)
   (write-line "  : boxed_column {" fp)
   (write-line "    label = \"Utilities\";" fp)
-  (write-line "    : button { key = \"btn_pclose\"; label = \"7. PCLOSE (Close Polylines)\"; }" fp)
+  (write-line "    : button { key = \"btn_pclose\"; label = \"7. PCLOSE (Close Polylines)\"; }
+  }
+  : boxed_column {
+    label = \"Alignment & Placement\";
+    : button { key = \"btn_mbbg\"; label = \"8. MBBG (Equal Margin Align)\"; }" fp)
   (write-line "  }" fp)
   (write-line "  spacer;" fp)
   (write-line "  ok_cancel;" fp)
@@ -1808,6 +1920,7 @@ Error: DCL 대화상자를 생성할 수 없습니다.")
   (action_tile "btn_mbbci" "(done_dialog 5)")
   (action_tile "btn_mbbw" "(done_dialog 6)")
   (action_tile "btn_pclose" "(done_dialog 7)")
+  (action_tile "btn_mbbg" "(done_dialog 8)")
   (action_tile "cancel" "(done_dialog 0)")
   
   (setq action (start_dialog))
@@ -1827,6 +1940,7 @@ Error: DCL 대화상자를 생성할 수 없습니다.")
     ((= action 5) (c:MBBCI))
     ((= action 6) (c:MBBW))
     ((= action 7) (c:PCLOSE))
+    ((= action 8) (c:MBBG))
   )
   (setq *MBB_DCL_THK* nil)
   (princ)
