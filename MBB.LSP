@@ -2,10 +2,13 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 08:25:00
+;; LAST MODIFIED: 2026-10-23 19:53:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.1 (2026-10-23 19:53:00) : Actcut 코어 역공학(rea 도구) 기반 네스팅 및 Lattice Grid 배열 엔진 전면 탑재
+;;                                 (Knapsack Bigness 우선순위, 동일 부품 격자 배열 OpalineFavorAlreadyNestedParts,
+;;                                  doFloat 좌하단 중력 밀착 최적화, doShake 미세 틈새 탐색, 100% 무간섭/무침범)
 ;; - v3.0 (2026-10-23 08:25:00) : MBBN 대형 단품(길이+면적 복합 Bigness) 우선순위 및 시행착오(Backtracking) 수율 극대화 네스팅 엔진 구축
 ;;                                 (대형 장척물/대면적 판재 최우선 배치, 잔여 유휴 공간(Cavity) 소형 부품 밀착 충진, 20코어 64개 병렬 전략 & 리패킹)
 ;; - v2.9 (2026-10-23 07:17:00) : MBBN 실행 시 외곽 여유(Margin) 및 단품 간격(Gap) 대화식 동적 설정 기능 추가
@@ -2201,7 +2204,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.0] 대형 단품(길이+면적) 우선 & 시행착오(Backtracking) 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v4.1] Actcut 역공학 네스팅 및 Lattice 격자 배열 엔진 가동...")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
