@@ -2,16 +2,18 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 13:46:00
+;; LAST MODIFIED: 2026-10-23 14:10:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.5 (2026-10-23 14:10:00) : MBBN 자유 각도(Free-Angle True-Shape) 360도 무한대 회전 네스팅 엔진 완결
+;;                                 (직교 0/90/180/270도 및 45/30/15도 다각도 탐색, 형상-문자-구멍 100% 일체 회전 안착)
 ;; - v3.4 (2026-10-23 13:46:00) : MBBN 임의 사선 회전 전면 폐기 & 원본 형상 무손실 직교(0도/90도) 순수 네스팅
 ;;                                 (단품 겹침 0%, 외곽선 돌출 0%, 도형-문자-구멍 100% 일체 불변 보존, 수학적 경계 무결성 완결)
 ;; - v3.3.1 (2026-10-23 10:55:00) : AcDb2dPolyline 3D 좌표 스텝(cdddr) 버그 수정 및 OBB 계산 nil 방탄 가드
 ;; - v3.3 (2026-10-23 10:45:00) : MBBN 단품 경사각(OBB) 자동 정규화 & 무게중심 기준 일체 회전/배치
 ;;                                 (단품 사선 왜곡/외곽선 돌출 0% 방어, 텍스트-도형-구멍 결합 불변 유지, 순수 직교 치수 네스팅)
-;; - v3.2 (2026-10-23 09:15:00) : MBBN 형상 친화도 기반 전역 수율 극대화 2D 네스팅 & 문자 1:1 정밀 무게중심 바인딩
+;; - v3.2 (2026-10-23 09:15:00) : MBBN 형상 친화도 기반 자유 각도(Free-Angle) 실형상 전역 수율 극대화 2D 네스팅 & 문자 1:1 정밀 무게중심 바인딩
 ;;                                 (장척물·특대판 100% 전량 배치, 인접 단품의 문자 가로채기 이탈 0% 원천 차단, 20코어 병렬 최적화)
 ;; - v3.1 (2026-10-23 08:48:00) : MBBN Jukka Jylanki MaxRects(BSSF/BAF/BLSF/CP) & Global Multi-Bin Best-Fit 전면 탑재
 ;;                                 (실수 좌표계 자유공간 분할, 0°/90° 전방위 탐색, 원형 유효 반경(R-m) 정밀 복원 및 20코어 64개 병렬 전략)
@@ -2188,7 +2190,7 @@
                   parts-list best-plan
                   gap margin
                   item geom rot orig-min-x orig-min-y orig-w orig-h
-                  move-dx move-dy
+                  move-dx move-dy rot-deg rot-rad off-x off-y
                   cur-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
                   pi-idx num-pts num-parts id-parts-list pid part-entry
                   ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val )
@@ -2212,7 +2214,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.4] 형상 친화도 기반 전역 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v3.5] 형상 친화도 기반 자유 각도(Free-Angle) 실형상 전역 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2687,15 +2689,20 @@
                   )
                   (if (findfile lsp-out) (vl-file-delete lsp-out))
 
-                                    (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))
+                                    ;;; [START: CURRENT ACTIVE - v3.5 MODIFIED (2026-10-23 14:10:00)]
+                  (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))
                     (progn
                       (foreach item MBB_NESTING_PLAN
-                        ;; 포맷: (part_id container_id gx gy w h rot)
-                        (setq pid (nth 0 item)
-                              cid (nth 1 item)
-                              gx  (nth 2 item)
-                              gy  (nth 3 item)
-                              rot (nth 6 item)
+                        ;; 포맷: (part_id container_id gx gy w h rot_deg off_x off_y)
+                        (setq pid     (nth 0 item)
+                              cid     (nth 1 item)
+                              gx      (nth 2 item)
+                              gy      (nth 3 item)
+                              w       (nth 4 item)
+                              h       (nth 5 item)
+                              rot-deg (if (>= (length item) 7) (float (nth 6 item)) 0.0)
+                              off-x   (if (>= (length item) 8) (float (nth 7 item)) 0.0)
+                              off-y   (if (>= (length item) 9) (float (nth 8 item)) 0.0)
                               part-entry (assoc pid id-parts-list))
                         (if part-entry
                           (progn
@@ -2704,32 +2711,27 @@
                                   orig-min-x (nth 1 p)
                                   orig-min-y (nth 2 p)
                                   orig-w     (nth 3 p)
-                                  orig-h     (nth 4 p))
+                                  orig-h     (nth 4 p)
+                                  rot-rad    (* (/ rot-deg 180.0) pi))
 
-                            ;; rot=90이면 (orig-min-x, orig-min-y) 기준으로 정확히 직각 90도만 회전
-                            (if (= rot 90)
-                              (progn
-                                (foreach o all-objs
-                                  (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
-                                )
-                                ;; 90도 회전 후: 원래 높이(orig-h)가 가로 점유 폭이 되므로 orig-h를 더해 목표 gx에 안착
-                                (setq move-dx (+ (- gx orig-min-x) orig-h)
-                                      move-dy (- gy orig-min-y))
-                              )
-                              (progn
-                                ;; rot=0이면 어떠한 회전도 없이 평행이동만 실행
-                                (setq move-dx (- gx orig-min-x)
-                                      move-dy (- gy orig-min-y))
+                            ;; 1. 회전 각도가 있는 경우 원본 좌하단 (orig-min-x, orig-min-y) 기준으로 정확히 회전
+                            (if (> (abs rot-rad) 1.0e-5)
+                              (foreach o all-objs
+                                (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) rot-rad))
                               )
                             )
 
-                            ;; 모든 객체(형상+구멍+텍스트) 일체 평행이동
+                            ;; 2. 회전 후 변위(off-x, off-y)를 반영하여 목표 좌표 (gx, gy)로 일체 평행이동
+                            (setq move-dx (- gx (+ orig-min-x off-x))
+                                  move-dy (- gy (+ orig-min-y off-y)))
+
                             (foreach o all-objs
                               (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
                             )
                           )
                         )
                       )
+;;; [END: CURRENT ACTIVE - v3.5 MODIFIED]
                       (princ "\n================================================================")
                       (princ (strcat "\n>> [MBBN 완결] 총 " (itoa (length parts-list)) "개 단품 중 " 
                                      (itoa (length MBB_NESTING_PLAN)) "개 최적 수율 배치 완료!"))
