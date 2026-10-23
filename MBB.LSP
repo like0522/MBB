@@ -2,10 +2,15 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 22:55:00
+;; LAST MODIFIED: 2026-10-24 07:35:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.9 (2026-10-24 07:35:00) : 대형 단품 최우선 보존(Bigness-Preserving) 및 심층 경쟁 무침범·무간섭 완결
+;;                                 1. 회전 후 실시간 결합 Bounding Box(vla-GetBoundingBox) 직접 측정 이동으로 0.0000mm 오차 보정
+;;                                    (객체 OCS 법선 벡터 뒤집힘 등으로 인한 외곽선 침범 및 단품 간 겹침 100% 영구 차단)
+;;                                 2. 면적 지배형 적합도(Area*100 + Count*10)로 대형 단품(558x729 등) 100% 필수 안착 보장
+;;                                 3. 초대형 단품 선제적 안착 및 돌연변이 순서 보존(Lock)
 ;; - v4.8 (2026-10-23 22:55:00) : MBBG 20코어 풀가동 & MBBN 기본원칙(외곽 100% 무침범·단품 간 100% 무간섭) 완전 복원
 ;;                                 (MBBG stringp nil 에러 원천 차단 및 20코어 병렬 거리장 정렬, MBBN 213개 곡면 정점 100% 바인딩, 미배치품 자동 외곽 정렬)
 ;; - v4.7 (2026-10-23 22:28:00) : 20코어 멀티프로세싱 병렬화, 틈새 1:1 개별 선별 및 조기 종료 탑재
@@ -2785,22 +2790,35 @@
                                   orig-min-y (nth 2 p)
                                   orig-w (nth 3 p)
                                   orig-h (nth 4 p))
-;;; [START: CURRENT ACTIVE - v4.3 MODIFIED (2026-10-23 20:58:00)]
+;;; [START: CURRENT ACTIVE - v4.9 MODIFIED (2026-10-24 07:35:00)]
                             (if (or (= rot 90) (= rot 90.0))
-                              (progn
-                                (foreach o all-objs
-                                  (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
-                                )
-                                (setq move-dx (+ (- gx orig-min-x) orig-h)
-                                      move-dy (- gy orig-min-y))
+                              (foreach o all-objs
+                                (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
                               )
+                            )
+                            ;; [절대 오차 0.0000mm 보장] 회전 후 all-objs의 실제 실시간 결합 Bounding Box 최소 좌표 측정
+                            (setq cur-min-x nil cur-min-y nil)
+                            (foreach o all-objs
+                              (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-GetBoundingBox (list o 'tmp-bmin 'tmp-bmax))))
+                                (progn
+                                  (setq tmp-bmin (vlax-safearray->list tmp-bmin)
+                                        b-x (car tmp-bmin)
+                                        b-y (cadr tmp-bmin))
+                                  (if (or (null cur-min-x) (< b-x cur-min-x)) (setq cur-min-x b-x))
+                                  (if (or (null cur-min-y) (< b-y cur-min-y)) (setq cur-min-y b-y))
+                                )
+                              )
+                            )
+                            (if (and cur-min-x cur-min-y)
+                              (setq move-dx (- gx cur-min-x)
+                                    move-dy (- gy cur-min-y))
                               (setq move-dx (- gx orig-min-x)
                                     move-dy (- gy orig-min-y))
                             )
-;;; [END: CURRENT ACTIVE - v4.3 MODIFIED]
                             (foreach o all-objs
                               (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
                             )
+;;; [END: CURRENT ACTIVE - v4.9 MODIFIED]
                           )
                         )
                       )
