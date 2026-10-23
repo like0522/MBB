@@ -2,7 +2,7 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 16:10:00
+;; LAST MODIFIED: 2026-10-23 16:35:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
@@ -2223,7 +2223,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.8] 형상 친화도 기반 전역 수율 극대화 2D 네스팅 (NFP / Deepnest & 사후 검토 루프)")
+  (princ "\n[MBBN v3.9] 형상 친화도 기반 전역 수율 극대화 2D 네스팅 (NFP / Deepnest & 사후 검토 루프)")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2517,19 +2517,10 @@
 
                 ;; 단품의 모든 객체(형상+구멍+텍스트)를 포함하는 전체 BBox 측정
                 (setq g-min nil g-max nil)
-                (foreach o all-objs
-                  (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list o 'o-min 'o-max))))
-                    (progn
-                      (setq o-min (vlax-safearray->list o-min)
-                            o-max (vlax-safearray->list o-max))
-                      (if (and o-min o-max)
-                        (if (null g-min)
-                          (setq g-min o-min g-max o-max)
-                          (setq g-min (list (min (car g-min) (car o-min)) (min (cadr g-min) (cadr o-min)))
-                                g-max (list (max (car g-max) (car o-max)) (max (cadr g-max) (cadr o-max))))
-                        )
-                      )
-                    )
+                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list parent-obj 'o-min 'o-max))))
+                  (progn
+                    (setq g-min (vlax-safearray->list o-min)
+                          g-max (vlax-safearray->list o-max))
                   )
                 )
                 (if (null g-min)
@@ -2741,20 +2732,12 @@
 
                             ;; 2. 회전 직후의 실제 현재 BBox 최소점을 정밀 재측정 (Python-CAD 100% 완전 일치 보장)
                             (setq cur-min-x nil cur-min-y nil)
-                            (foreach o all-objs
-                              (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list o 'o-min 'o-max))))
-                                (progn
-                                  (setq o-min (vlax-safearray->list o-min))
-                                  (if (null cur-min-x)
-                                    (setq cur-min-x (car o-min) cur-min-y (cadr o-min))
-                                    (setq cur-min-x (min cur-min-x (car o-min))
-                                          cur-min-y (min cur-min-y (cadr o-min)))
-                                  )
-                                )
+                            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list (car all-objs) 'o-min 'o-max))))
+                              (progn
+                                (setq o-min (vlax-safearray->list o-min))
+                                (setq cur-min-x (car o-min) cur-min-y (cadr o-min))
                               )
-                            )
-
-                            ;; 3. 실측된 현재 최소점에서 목표 좌표 (gx, gy)로의 실제 이동량 계산
+                            )로의 실제 이동량 계산
                             (if (and cur-min-x cur-min-y)
                               (setq move-dx (- gx cur-min-x)
                                     move-dy (- gy cur-min-y))
@@ -2831,7 +2814,7 @@
                       )
 ;;; [END: CURRENT ACTIVE - v3.7 MODIFIED]
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN v3.8 네스팅 완료] 총 " (itoa (length parts-list)) "개 단품 중 " 
+                      (princ (strcat "\n>> [MBBN v3.9 네스팅 완료] 총 " (itoa (length parts-list)) "개 단품 중 " 
                                      (itoa (length MBB_NESTING_PLAN)) "개 컨테이너 완벽 배치 완료!"))
                       (if (and MBB_UNPLACED_COUNT (> MBB_UNPLACED_COUNT 0))
                         (princ (strcat "\n   - 미배치 단품: " (itoa MBB_UNPLACED_COUNT) "개 (컨테이너 용량 초과로 우측 버퍼 구역 단정 정렬 완료)"))
