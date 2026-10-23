@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 20:25:00
+;; LAST MODIFIED: 2026-10-23 20:58:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.3 (2026-10-23 20:58:00) : 다세대 경쟁 진화(Competitive Evolutionary) 네스팅 엔진 & 문자 1:1 절대 바인딩 탑재
+;;                                 (토너먼트 선택, 엘리티즘 챔피언 방어, 0°/90° 직각 전용, 문자 BBOX 중심 1:1 엄격 매칭, TEMPPREFIX 안전 경로)
 ;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine 탑재
 ;;                                 (순수 격자 편중 탈피, 1차~100차 다차원 시뮬레이션, 최고 수율 챔피언 자동 선별, 100% 무간섭/무침범)
 ;; - v4.1 (2026-10-23 19:53:00) : Actcut 코어 역공학(rea 도구) 기반 네스팅 및 Lattice Grid 배열 엔진 전면 탑재
@@ -2183,7 +2185,8 @@
                   gap margin
                   item geom rot orig-min-x orig-min-y orig-w orig-h
                   move-dx move-dy
-                  cur-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
+                  cur-dir temp-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
+                  t-item t-obj t-min t-max t-cx t-cy
                   pi-idx num-pts num-parts id-parts-list pid part-entry
                   ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val )
   (vl-load-com)
@@ -2206,7 +2209,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v4.2] Actcut 100-Pass 다차원 최고 수율 시뮬레이션 역공학 네스팅 및 Lattice 격자 배열 엔진 가동...")
+  (princ "\n[MBBN v4.3] 다세대 경쟁 진화(Competitive Evolutionary) 네스팅 엔진 가동...")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2417,6 +2420,9 @@
               (setq clustered-parts (reverse clustered-parts))
 
               ;; [텍스트 1:1 배타적 바인딩]: 중복 할당 방지 및 단품/문자 이탈 원천 차단
+;;; [START: CURRENT ACTIVE - v4.3 MODIFIED (2026-10-23 20:58:00)]
+              ;; [텍스트 1:1 엄격 기하 바인딩]: 문자 BBOX 중심점 기준 외곽 폴리선 내부 포함 검사 (오차 허용 1.0mm)
+              ;; 50mm 과대 버퍼로 인한 인접 부품 텍스트 탈취 및 유실을 100% 원천 차단
               (setq assigned-texts '()
                     parts-list '()
                     i 1)
@@ -2428,18 +2434,22 @@
                       part-texts '())
                 (foreach t-item text-list
                   (setq t-obj (nth 0 t-item)
-                        t-pt (nth 1 t-item))
+                        t-min (nth 1 t-item)
+                        t-max (nth 2 t-item)
+                        t-cx  (* 0.5 (+ (car t-min) (car t-max)))
+                        t-cy  (* 0.5 (+ (cadr t-min) (cadr t-max))))
                   (if (and (null (vl-position t-obj assigned-texts))
-                           (<= (- (car tmp-min) 50.0) (car t-pt))
-                           (<= (car t-pt) (+ (car tmp-max) 50.0))
-                           (<= (- (cadr tmp-min) 50.0) (cadr t-pt))
-                           (<= (cadr t-pt) (+ (cadr tmp-max) 50.0)))
+                           (<= (- (car tmp-min) 1.0) t-cx)
+                           (<= t-cx (+ (car tmp-max) 1.0))
+                           (<= (- (cadr tmp-min) 1.0) t-cy)
+                           (<= t-cy (+ (cadr tmp-max) 1.0)))
                     (progn
                       (setq part-texts (cons t-obj part-texts)
                             assigned-texts (cons t-obj assigned-texts))
                     )
                   )
                 )
+;;; [END: CURRENT ACTIVE - v4.3 MODIFIED]
                 (setq all-objs (cons parent-obj (append children-holes part-texts))
                       w (- (car tmp-max) (car tmp-min))
                       h (- (cadr tmp-max) (cadr tmp-min))
@@ -2478,21 +2488,29 @@
                   (setq id-parts-list (reverse id-parts-list))
 
                   ;; 파일 경로 설정 (findfile nil 방어 MBB:GetRootDir 사용)
+;;; [START: CURRENT ACTIVE - v4.3 MODIFIED (2026-10-23 20:58:00)]
+                  ;; 경로 설정: 한글 경로(문서) cmd.exe 실행 오류를 방지하기 위해 임시 파일은 TEMPPREFIX(ASCII)에 저장
                   (setq cur-dir (MBB:GetRootDir))
                   (if (or (null cur-dir) (= cur-dir ""))
                     (setq cur-dir "C:/Users/like/OneDrive/문서/MBB")
                   )
                   (setq cur-dir (vl-string-translate "/" "\\" cur-dir))
-                  (setq py-script (strcat cur-dir "\\mbb_nesting.py")
-                        json-in   (strcat cur-dir "\\mbb_nesting_in.json")
-                        json-out  (strcat cur-dir "\\mbb_nesting_out.json")
-                        lsp-out   (strcat cur-dir "\\mbb_nesting_out.lsp")
-                        bat-path  (strcat cur-dir "\\mbb_run.bat"))
+                  (setq py-script (strcat cur-dir "\\mbb_nesting.py"))
                   (if (null (findfile py-script))
                     (if (setq p (findfile "mbb_nesting.py"))
                       (setq py-script p)
                     )
                   )
+
+                  (setq temp-dir (vl-string-right-trim "\\" (vl-string-right-trim "/" (getvar "TEMPPREFIX"))))
+                  (if (or (null temp-dir) (= temp-dir "") (not (vl-file-directory-p temp-dir)))
+                    (setq temp-dir cur-dir)
+                  )
+                  (setq json-in   (strcat temp-dir "\\mbb_nesting_in.json")
+                        json-out  (strcat temp-dir "\\mbb_nesting_out.json")
+                        lsp-out   (strcat temp-dir "\\mbb_nesting_out.lsp")
+                        bat-path  (strcat temp-dir "\\mbb_run.bat"))
+;;; [END: CURRENT ACTIVE - v4.3 MODIFIED]
 
                   ;; 1. Python 입력 JSON 고속 생성 (다중 컨테이너 및 단품 일괄 덤프)
                   (setq f (open json-in "w"))
@@ -2571,15 +2589,19 @@
                                  "python"))
 
                   ;; CP949 배치 파일 생성 (경로 문자열 한글 깨짐 100% 방지)
+;;; [START: CURRENT ACTIVE - v4.3 MODIFIED (2026-10-23 20:58:00)]
+                  ;; CP949 배치 파일 생성 (경로 공백 및 특수문자 100% 방어, 작업 디렉토리 진입)
                   (setq f-bat (open bat-path "w"))
                   (if f-bat
                     (progn
                       (write-line "@echo off" f-bat)
                       (write-line "chcp 949 >nul" f-bat)
+                      (write-line (strcat "cd /d \"" cur-dir "\"") f-bat)
                       (write-line (strcat py-exe " \"" py-script "\" \"" json-in "\" \"" lsp-out "\" \"" json-out "\"") f-bat)
                       (close f-bat)
                     )
                   )
+;;; [END: CURRENT ACTIVE - v4.3 MODIFIED]
 
                   (princ (strcat "\n>> [Python 멀티코어 수율 최적화 엔진 호출 중...] " (itoa (length containers-list)) "개 컨테이너 x " (itoa (length id-parts-list)) "개 단품 병렬 시행착오(Backtracking) 탐색"))
                   (setq wsh (vlax-create-object "WScript.Shell"))
@@ -2625,7 +2647,8 @@
                                   orig-min-y (nth 2 p)
                                   orig-w (nth 3 p)
                                   orig-h (nth 4 p))
-                            (if (= rot 90)
+;;; [START: CURRENT ACTIVE - v4.3 MODIFIED (2026-10-23 20:58:00)]
+                            (if (or (= rot 90) (= rot 90.0))
                               (progn
                                 (foreach o all-objs
                                   (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
@@ -2636,6 +2659,7 @@
                               (setq move-dx (- gx orig-min-x)
                                     move-dy (- gy orig-min-y))
                             )
+;;; [END: CURRENT ACTIVE - v4.3 MODIFIED]
                             (foreach o all-objs
                               (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
                             )

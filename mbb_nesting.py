@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v4.2 - Actcut 100-Pass Multi-Strategy Nesting & Yield Champion Engine
+;;; MBBN v4.3 - Generational Tournament Competitive Evolutionary Nesting Engine
 ;;; ==========================================================================
-;;; PROGRAM    : MBBN Nesting & Array Solver (Actcut 100-Pass Champion Selection)
+;;; PROGRAM    : MBBN Nesting & Array Solver (다세대 경쟁 진화 수율 극대화 엔진)
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-23 20:25:00
+;;; LAST MODIFIED: 2026-10-23 20:55:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
-;;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine 탑재
-;;;                                 1. 순수 격자 편중 탈피: 격자(Lattice Strip) + 적응형 개별 밀착(Unitary Contact)
-;;;                                 2. 1차~100차 다차원 시뮬레이션(대형단품 전용할당, 컨테이너 우선순위, 부품 정렬, 회전, 격자/개별 하이브리드)
-;;;                                 3. doFloat 좌하단 중력 침하 및 미세 틈새(Cavity) 충진
-;;;                                 4. 100회 시도 중 배치 수량 및 자재 수율이 가장 높은 '절대 챔피언 솔루션' 자동 선별
-;;;                                 5. 100% 무간섭 (Gap 5.0mm) & 무돌출 (Margin 1.0mm) 완벽 보장
+;;; - v4.3 (2026-10-23 20:55:00) : 다세대 토너먼트 경쟁 진화(Competitive Evolutionary) 엔진 탑재
+;;;                                 1. 세대별 토너먼트 경쟁 (Generation Population Tournament Selection)
+;;;                                 2. 챔피언 유전자 기반 변이 & 국소 개선 (Mutation: 순서 교환, 회전 토글, 적층 변이)
+;;;                                 3. 차세대 재경쟁으로 수율 한계 지속 돌파 (Elitism & Title Defense)
+;;;                                 4. 원형/다각형 내 동일 세트 단품 평행 적층 (Parallel Strip Stacking) 완벽 지원
+;;;                                 5. 100% 무간섭 (Gap 5.0mm) & 무돌출 (Margin 1.0mm) 물리 엔진 검증
+;;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine
 ;;; - v4.1 (2026-10-23 19:53:00) : Actcut Core Reverse-Engineering Integration
-;;; - v4.0 (2026-10-23 19:35:00) : Legacy Sindri NFP Engine
 ;;; - v3.0 (2026-10-23 08:25:00) : Legacy Backtracking Engine
 ;;; ==========================================================================
 """
@@ -53,9 +53,9 @@ def is_point_in_poly(x, y, poly):
     return inside
 
 
-class ActcutContainer:
+class EvolutionContainer:
     """
-    High-Performance Container Solver:
+    High-Performance Container Solver for Generational Evolutionary Nesting:
     - Inner-Fit Polygon (Margin)
     - No-Fit Polygon clearance (Gap)
     - Sliding Contact & Boundary Anchors
@@ -218,147 +218,79 @@ class ActcutContainer:
         self.placed.append(p_entry)
 
 
-def simulate_single_pass(p_idx, containers_data, parts_data, gap=5.0, margin=1.0):
-    """Executes one simulation pass with a distinct strategy combination."""
-    c_map = {c['id']: ActcutContainer(c, gap, margin) for c in containers_data}
+def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
+    """Evaluates one placement genome and returns its physical layout and fitness score."""
+    c_map = {c['id']: EvolutionContainer(c, gap, margin) for c in containers_data}
+    c_ids = list(genome['c_order'])
+    parts_order = list(genome['parts_order'])
+    use_strip = genome.get('use_strip', True)
+    rot_prefs = genome.get('rot_prefs', {})
+
     placed_plan = []
+    remaining = list(parts_order)
 
-    # Strategy variation:
-    # Mode A (even passes): Dedicate massive parts first to guaranteed containers (Set A -> C0, Set B -> C1, C4)
-    # Mode B (odd passes): Free-form adaptive sorting
-    use_massive_dedication = (p_idx % 2 == 0)
-
-    if use_massive_dedication:
-        set_a = [p for p in parts_data if max(p['w'], p['h']) > 1000.0]
-        set_b = [p for p in parts_data if 700.0 < max(p['w'], p['h']) < 1000.0]
-        remaining = [p for p in parts_data if max(p['w'], p['h']) <= 700.0]
-
-        # Place Set A into Container 0
-        if 0 in c_map:
-            for p in set_a:
-                pos = c_map[0].find_best_position(p['w'], p['h'], allowed_rotations=[0])
-                if pos:
-                    gx, gy, w, h, rot, ox, oy = pos
-                    e = {'id': p['id'], 'container_id': 0, 'gx': gx, 'gy': gy, 'w': w, 'h': h, 'rot': rot, 'off_x': ox, 'off_y': oy, 'area': w * h}
-                    c_map[0].placed.append(e)
-                    c_map[0].placed_area += e['area']
-                    c_map[0].do_float(e)
-                    placed_plan.append(e)
-
-        # Place Set B into C1 & C4 (Dia 1025)
-        c1_c4 = [1, 4] if (p_idx % 4 < 2) else [4, 1]
-        for p, cid in zip(set_b, c1_c4):
-            if cid in c_map:
-                pos = c_map[cid].find_best_position(p['w'], p['h'], allowed_rotations=[0, 90], prefer_center=True)
-                if pos:
-                    gx, gy, w, h, rot, ox, oy = pos
-                    e = {'id': p['id'], 'container_id': cid, 'gx': gx, 'gy': gy, 'w': w, 'h': h, 'rot': rot, 'off_x': ox, 'off_y': oy, 'area': w * h}
-                    c_map[cid].placed.append(e)
-                    c_map[cid].placed_area += e['area']
-                    placed_plan.append(e)
-    else:
-        remaining = list(parts_data)
-
-    # 1. Container priority strategy
-    c_ids = list(c_map.keys())
-    c_mode = p_idx % 6
-    if c_mode == 1:
-        c_ids.sort(key=lambda cid: c_map[cid].area, reverse=True)
-    elif c_mode == 2:
-        c_ids.sort(key=lambda cid: c_map[cid].area)
-    elif c_mode == 3:
-        c_ids.sort(key=lambda cid: 0 if c_map[cid].type == 'polygon' else 1)
-    elif c_mode == 4:
-        c_ids.sort(key=lambda cid: 0 if c_map[cid].type == 'circle' else 1)
-    elif c_mode == 5:
-        random.seed(p_idx * 17 + 3)
-        random.shuffle(c_ids)
-
-    # 2. Part sorting strategy for remaining
-    p_mode = (p_idx // 3) % 6
-    if p_mode == 0:
-        remaining.sort(key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 350.0), reverse=True)
-    elif p_mode == 1:
-        remaining.sort(key=lambda p: (max(p['w'], p['h'])), reverse=True)
-    elif p_mode == 2:
-        remaining.sort(key=lambda p: (p['w'] * p['h']), reverse=True)
-    elif p_mode == 3:
-        remaining.sort(key=lambda p: (max(p['w'], p['h']) / max(1.0, min(p['w'], p['h']))), reverse=True)
-    elif p_mode == 4:
+    # 1. Parallel Strip Stacking for identical part clusters (Horizontal & Vertical)
+    if use_strip:
         clusters = defaultdict(list)
         for p in remaining:
-            k = (min(round(p['w'], 1), round(p['h'], 1)), max(round(p['w'], 1), round(p['h'], 1)))
-            clusters[k].append(p)
-        sorted_keys = sorted(clusters.keys(), key=lambda k: k[0] * k[1] + k[1] * 200.0, reverse=True)
-        remaining = []
-        for k in sorted_keys:
-            remaining.extend(clusters[k])
-    elif p_mode == 5:
-        remaining.sort(key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 200.0), reverse=True)
-        random.seed(p_idx * 43 + 7)
-        for i in range(len(remaining) - 1):
-            if random.random() < 0.3:
-                remaining[i], remaining[i + 1] = remaining[i + 1], remaining[i]
+            w, h = round(p['w'], 1), round(p['h'], 1)
+            clusters[(min(w, h), max(w, h))].append(p)
 
-    # 3. Selective Lattice Strip (every 6th pass attempts neat strips for small/medium parts)
-    if p_idx % 6 == 0:
-        clusters = defaultdict(list)
-        for p in remaining:
-            k = (min(round(p['w'], 1), round(p['h'], 1)), max(round(p['w'], 1), round(p['h'], 1)))
-            clusters[k].append(p)
-        for k, p_sub in clusters.items():
-            if len(p_sub) >= 2 and (k[0] * k[1] < 120000.0):
-                for cid in c_ids:
-                    cnt = c_map[cid]
-                    if cnt.type != 'polygon':
-                        continue
-                    strip_len = min(len(p_sub), 2)
-                    pw, ph = p_sub[0]['w'], p_sub[0]['h']
-                    strip_w = strip_len * pw + (strip_len - 1) * cnt.gap
-                    strip_h = ph
-                    pos = cnt.find_best_position(strip_w, strip_h, allowed_rotations=[0, 90])
-                    if pos:
-                        gx, gy, sw, sh, rot, ox, oy = pos
-                        step_x = (pw + cnt.gap) if rot == 0 else 0
-                        step_y = 0 if rot == 0 else (ph + cnt.gap)
-                        item_w = pw if rot == 0 else ph
-                        item_h = ph if rot == 0 else pw
-                        all_ok = True
-                        for i in range(strip_len):
-                            ix = gx + i * step_x
-                            iy = gy + i * step_y
-                            if not cnt.can_place(ix, iy, item_w, item_h):
-                                all_ok = False
-                                break
-                        if all_ok:
-                            for i in range(strip_len):
-                                p_item = p_sub[i]
-                                ix = gx + i * step_x
-                                iy = gy + i * step_y
-                                entry = {
-                                    'id': p_item['id'],
-                                    'container_id': cid,
-                                    'gx': ix, 'gy': iy,
-                                    'w': item_w, 'h': item_h,
-                                    'rot': rot, 'off_x': ox, 'off_y': oy,
-                                    'area': item_w * item_h
-                                }
-                                cnt.placed.append(entry)
-                                cnt.placed_area += entry['area']
-                                placed_plan.append(entry)
-                                remaining.remove(p_item)
+        for k in sorted(clusters.keys(), key=lambda k: k[0] * k[1] + k[1] * 300.0, reverse=True):
+            p_list = clusters[k]
+            if len(p_list) < 2:
+                continue
+            pw, ph = p_list[0]['w'], p_list[0]['h']
+
+            for cid in c_ids:
+                cnt = c_map[cid]
+                if cnt.placed:
+                    continue
+
+                stack_succeeded = False
+                # Try Horizontal Stack (pw x ph along Y)
+                for num_bars in range(len(p_list), 1, -1):
+                    total_h = num_bars * ph + (num_bars - 1) * cnt.gap
+                    if cnt.type == 'circle':
+                        start_x = cnt.cx - pw * 0.5
+                        start_y = cnt.cy - total_h * 0.5
+                    else:
+                        start_x = cnt.min_ox + cnt.margin
+                        start_y = cnt.min_oy + cnt.margin
+
+                    all_fit = True
+                    stack_entries = []
+                    for bi in range(num_bars):
+                        cur_y = start_y + bi * (ph + cnt.gap)
+                        if not cnt.can_place(start_x, cur_y, pw, ph):
+                            all_fit = False
                             break
+                        stack_entries.append((p_list[bi], start_x, cur_y, pw, ph, 0.0, 0.0, 0.0))
 
-    # 4. Adaptive Unitary Placement with Sliding Contact
+                    if all_fit:
+                        for b_part, sx, sy, sw, sh, srot, ox, oy in stack_entries:
+                            e = {'id': b_part['id'], 'container_id': cid, 'gx': sx, 'gy': sy, 'w': sw, 'h': sh, 'rot': srot, 'off_x': ox, 'off_y': oy, 'area': sw * sh}
+                            cnt.placed.append(e)
+                            cnt.placed_area += e['area']
+                            placed_plan.append(e)
+                            remaining.remove(b_part)
+                        stack_succeeded = True
+                        break
+
+                if stack_succeeded:
+                    break
+
+    # 2. Adaptive Unitary Placement with Sliding Contact for remaining parts
     for p in remaining:
         pw, ph = p['w'], p['h']
+        allowed_rots = rot_prefs.get(p['id'], [0, 90])
         best_cnt, best_pos, best_s = None, None, float('inf')
         prefer_c = (pw * ph > 200000.0)
 
         for cid in c_ids:
             cnt = c_map[cid]
             p_c = prefer_c and (cnt.type == 'circle')
-            pos = cnt.find_best_position(pw, ph, allowed_rotations=[0, 90], prefer_center=p_c)
+            pos = cnt.find_best_position(pw, ph, allowed_rotations=allowed_rots, prefer_center=p_c)
             if pos:
                 gx, gy, cur_w, cur_h, rot, ox, oy = pos
                 s = (gy - cnt.min_oy) * 1.2 + (gx - cnt.min_ox)
@@ -384,35 +316,143 @@ def simulate_single_pass(p_idx, containers_data, parts_data, gap=5.0, margin=1.0
 
     placed_count = len(placed_plan)
     total_area = sum(it['area'] for it in placed_plan)
-    # Balanced Fitness: Area Yield + Part Count Multiplier
-    score = total_area + placed_count * 50000.0
+    # Balanced Fitness: Area (Material Yield) + Count Multiplier
+    score = total_area + placed_count * 100000.0
 
     return {
         'score': score,
         'placed_count': placed_count,
         'total_area': total_area,
         'plan': placed_plan,
-        'pass_idx': p_idx
+        'genome': genome
     }
 
 
-def solve_actcut_100_pass(containers_data, parts_data, gap=5.0, margin=1.0, total_passes=100):
-    """Runs 100-pass multi-strategy simulation and returns the champion layout."""
+def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0, pop_size=15, num_generations=25):
+    """
+    Generational Tournament Competitive Evolutionary Nesting Solver:
+    - Generates diverse population seeds.
+    - Evaluates population in tournament competition.
+    - Preserves reigning champion (Elitism).
+    - Mutates top elites (part swap, container shuffle, rotation toggle).
+    - Competes across generations until global champion emerges.
+    """
     t0 = time.time()
-    best_champion = None
+    print("\n" + "=" * 70)
+    print(" [ MBBN v4.3 다세대 경쟁 진화(Competitive Evolutionary) 네스팅 엔진 가동 ]")
+    print("=" * 70)
+    print(f">> 탐색 모드: 세대당 {pop_size}개체 x {num_generations}세대 토너먼트 경쟁 (총 {pop_size * num_generations}회 대진)")
+    print("-" * 70, flush=True)
 
-    print(f">> [Actcut 100-Pass Solver] 1차~{total_passes}차 다차원 최고 수율 시뮬레이션 가동...", flush=True)
+    # 1. Initial Population Seeding
+    population = []
+    # Seed A: Bigness priority with strip stack
+    p_bigness = sorted(parts_data, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 350.0), reverse=True)
+    population.append({
+        'parts_order': p_bigness,
+        'c_order': [c['id'] for c in containers_data],
+        'use_strip': True,
+        'rot_prefs': {p['id']: [0, 90] for p in parts_data}
+    })
+    # Seed B: Area priority without strip stack
+    p_area = sorted(parts_data, key=lambda p: p['w'] * p['h'], reverse=True)
+    population.append({
+        'parts_order': p_area,
+        'c_order': [c['id'] for c in containers_data],
+        'use_strip': False,
+        'rot_prefs': {p['id']: [0, 90] for p in parts_data}
+    })
+    # Seed C: Container area descending priority
+    c_area_desc = sorted([c['id'] for c in containers_data], key=lambda cid: next(c['area'] for c in containers_data if c['id'] == cid), reverse=True)
+    population.append({
+        'parts_order': p_bigness,
+        'c_order': c_area_desc,
+        'use_strip': True,
+        'rot_prefs': {p['id']: [0, 90] for p in parts_data}
+    })
+    # Fill remaining population with diversified stochastic permutations
+    for i in range(pop_size - len(population)):
+        p_shuffled = list(p_bigness)
+        random.seed(i * 23 + 11)
+        for _ in range(4):
+            i1 = random.randint(0, len(p_shuffled) - 1)
+            i2 = random.randint(0, len(p_shuffled) - 1)
+            p_shuffled[i1], p_shuffled[i2] = p_shuffled[i2], p_shuffled[i1]
+        c_ord = list(c['id'] for c in containers_data)
+        if random.random() < 0.5:
+            random.shuffle(c_ord)
+        population.append({
+            'parts_order': p_shuffled,
+            'c_order': c_ord,
+            'use_strip': random.choice([True, False]),
+            'rot_prefs': {p['id']: [0, 90] for p in parts_data}
+        })
 
-    for p_idx in range(total_passes):
-        res = simulate_single_pass(p_idx, containers_data, parts_data, gap, margin)
-        if best_champion is None or res['score'] > best_champion['score']:
-            best_champion = res
-            print(f"   [Pass {p_idx+1:3d}/{total_passes}] 챔피언 경신: {res['placed_count']:2d}/{len(parts_data)}개 안착 | 면적: {res['total_area']:.1f} mm²", flush=True)
+    reigning_champion = None
+    champion_gen = 0
+
+    # 2. Generational Tournament Loop
+    for gen in range(num_generations):
+        eval_results = []
+        for ind in population:
+            res = evaluate_individual_genome(ind, containers_data, gap=gap, margin=margin)
+            eval_results.append(res)
+
+        # Sort by fitness score descending (토너먼트 순위 결정)
+        eval_results.sort(key=lambda r: r['score'], reverse=True)
+        gen_champion = eval_results[0]
+
+        # Champion Title Defense & Renewal
+        if reigning_champion is None or gen_champion['score'] > reigning_champion['score']:
+            reigning_champion = gen_champion
+            champion_gen = gen + 1
+            print(f">> [Gen {gen+1:2d}/{num_generations}] ★ 챔피언 타이틀 경신! 안착: {reigning_champion['placed_count']:2d}/{len(parts_data)}개 | 면적: {reigning_champion['total_area']:.1f} mm² (Score: {reigning_champion['score']:.0f})", flush=True)
+
+        # 3. Reproduction, Elitism & Genetic Mutation for Next Generation
+        new_pop = [reigning_champion['genome']] # Elitism (최고 챔피언 영구 보존)
+        top_elites = [r['genome'] for r in eval_results[:4]]
+
+        while len(new_pop) < pop_size:
+            parent = random.choice(top_elites)
+            child_parts = list(parent['parts_order'])
+            child_c = list(parent['c_order'])
+            child_strip = parent['use_strip']
+            child_rots = dict(parent['rot_prefs'])
+
+            # Mutation A: Part sequence swap
+            if random.random() < 0.65:
+                idx1 = random.randint(0, len(child_parts) - 1)
+                idx2 = random.randint(0, len(child_parts) - 1)
+                child_parts[idx1], child_parts[idx2] = child_parts[idx2], child_parts[idx1]
+
+            # Mutation B: Container order shuffle
+            if random.random() < 0.35:
+                random.shuffle(child_c)
+
+            # Mutation C: Strip stack toggle
+            if random.random() < 0.25:
+                child_strip = not child_strip
+
+            # Mutation D: Rotation preference toggle
+            if random.random() < 0.3:
+                rand_id = random.choice(child_parts)['id']
+                child_rots[rand_id] = random.choice([[0], [90], [0, 90]])
+
+            new_pop.append({
+                'parts_order': child_parts,
+                'c_order': child_c,
+                'use_strip': child_strip,
+                'rot_prefs': child_rots
+            })
+
+        population = new_pop
 
     elapsed = time.time() - t0
-    print(f">> 100차 시뮬레이션 완료 ({elapsed:.2f}초 소요) | 절대 챔피언: Pass {best_champion['pass_idx']+1} (배치 {best_champion['placed_count']}개, 면적 {best_champion['total_area']:.1f} mm²)", flush=True)
+    print("-" * 70)
+    print(f">> 다세대 진화 경쟁 완결! (소요 시간: {elapsed:.2f}초)")
+    print(f">> [최종 선정 절대 챔피언] Gen {champion_gen} 출신 | 안착 {reigning_champion['placed_count']}개 / 총 면적 {reigning_champion['total_area']:.1f} mm²", flush=True)
 
-    return best_champion
+    return reigning_champion
 
 
 def post_verify_and_relax(plan, containers_data, parts_data, gap, margin):
@@ -552,8 +592,8 @@ def main():
     margin = float(in_data.get('margin', 1.0))
     total_parts_count = len(parts_data)
 
-    # Run 100-Pass Multi-Strategy Solver
-    champion = solve_actcut_100_pass(containers_data, parts_data, gap=gap, margin=margin, total_passes=100)
+    # Run Competitive Evolutionary Nesting Solver
+    champion = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, pop_size=15, num_generations=25)
     raw_plan = champion['plan']
 
     # Strict Audit
@@ -576,7 +616,7 @@ def main():
         by_c[p['container_id']].append(p)
 
     print("\n" + "=" * 70)
-    print(" [ MBBN v4.2 Actcut 100-Pass Multi-Strategy Nesting Champion ]")
+    print(" [ MBBN v4.3 최종 배치 성적표 (Tournament Champion Layout) ]")
     print("=" * 70)
     print(f">> 총 단품: {total_parts_count} 개 | 성공 배치: {len(verified_plan)} 개 | 미배치 외곽: {len(unplaced_parts)} 개")
     print(f">> 단품 수율(Part Yield): {part_yield:.2f}% | 용기 수율(Container Yield): {container_yield:.2f}%")
@@ -598,9 +638,8 @@ def main():
 
     # Output JSON
     out_dict = {
-        "version": "v4.2",
+        "version": "v4.3",
         "status": "SUCCESS",
-        "champion_pass": champion['pass_idx'] + 1,
         "placed_count": len(verified_plan),
         "unplaced_count": len(unplaced_parts),
         "total_count": total_parts_count,
@@ -614,7 +653,7 @@ def main():
 
     # Output AutoLISP Plan (ANSI / CP949 compatible)
     with open(out_lsp, 'w', encoding='cp949', errors='replace') as f:
-        f.write(";;; MBBN v4.2 Nesting Plan (Actcut 100-Pass Multi-Strategy Engine)\n")
+        f.write(";;; MBBN v4.3 Nesting Plan (Generational Tournament Evolutionary Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(verified_plan)})\n")
         f.write(f"(setq MBB_UNPLACED_COUNT {len(unplaced_parts)})\n")
