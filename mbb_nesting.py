@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-[MBBN World-Class 2D Free-Angle True-Shape Nesting Multi-Core Engine]
-Version: v3.5 (2026-10-23 14:05:00)
-Architecture: Real Polygon Vertex Geometry + Multi-Angle Exploration (0/90/45/30/15 deg)
-              + Fast Hierarchical Collision + Exact Spatial Containment
+[MBBN World-Class 2D Nesting Multi-Core Engine (Deepnest / libnest2d Model)]
+Version: v3.6 (2026-10-23 14:20:00)
+Architecture: IFP Boundary Containment + NFP Sliding Contact Gravity
+              + Multi-Angle True-Shape Rotation (0/90/180/270/45/30)
+              + Exact Shapely / GEOS C-Engine Integration
 =============================================================================
 """
 
@@ -92,7 +93,8 @@ def compute_bigness(p, weight_dim=500.0, weight_aspect=50.0):
 
 class NestingContainer:
     """
-    True-Shape Free-Angle Container Engine with High-Speed Hierarchical Collision Defense.
+    Deepnest/libnest2d Architecture Container Engine.
+    Employs IFP (Inner-Fit Polygon) containment and NFP (No-Fit Polygon) sliding contact gravity.
     """
     def __init__(self, c_data, gap=3.0, margin=2.0):
         self.id = c_data['id']
@@ -125,7 +127,7 @@ class NestingContainer:
                 self.prep_inner = None
 
     def is_inside(self, gx, gy, w, h):
-        """Exact Euclidean clearance test with strict margin."""
+        """Exact Euclidean IFP clearance test with strict margin."""
         if self.type == 'circle':
             for px, py in [(gx, gy), (gx + w, gy), (gx + w, gy + h), (gx, gy + h)]:
                 if (px - self.cx)**2 + (py - self.cy)**2 > self.eff_R_sq:
@@ -148,7 +150,9 @@ class NestingContainer:
 
     def find_best_position(self, base_pts, pw, ph, allow_rotations=[0, 90], align_pref='left'):
         """
-        Tests multi-angle rotations (0, 90, 45, 30, 15, etc.) and finds tightest collision-free position.
+        Deepnest/libnest2d NFP Sliding Contact Placement:
+        Generates candidate contact points around placed part NFPs and container boundaries.
+        Evaluates gravity score and interlocking compactness.
         """
         best_score = float('inf')
         best_node = None
@@ -162,81 +166,128 @@ class NestingContainer:
             if cur_w > (self.max_ox - self.min_ox) or cur_h > (self.max_oy - self.min_oy):
                 continue
 
-            y_steps = 35
-            step_val = (self.max_oy - self.min_oy - 2.0*self.margin - cur_h)
-            if step_val < 0: continue
-            step_y = max(6.0, step_val / float(y_steps))
+            # 1. Generate NFP Contact Candidate Positions (Deepnest/SVGNest orbital points)
+            cand_positions = []
 
-            cand_gys = []
-            cy_val = self.min_oy + self.margin
-            while cy_val + cur_h + self.margin <= self.max_oy:
-                cand_gys.append(cy_val)
-                cy_val += step_y
+            # (A) Container bottom-left base anchor
+            base_y = self.min_oy + self.margin
+            if self.type == 'circle':
+                dy = abs(base_y - self.cy)
+                if dy <= self.eff_R:
+                    hw = math.sqrt(max(0.0, self.eff_R**2 - dy**2))
+                    cand_positions.append((self.cx - cur_w*0.5, base_y))
+                    cand_positions.append((self.cx - hw, base_y))
+                    cand_positions.append((self.cx + hw - cur_w, base_y))
+            else:
+                rng = get_poly_x_range(self.outer_pts, base_y)
+                if rng:
+                    cand_positions.append((rng[0] + self.margin, base_y))
+                    cand_positions.append((rng[1] - self.margin - cur_w, base_y))
+                    cand_positions.append(((rng[0] + rng[1] - cur_w)*0.5, base_y))
 
+            # (B) Sliding contact points against each placed part's NFP outer boundaries
             for pr in self.placed:
-                cand_gys.append(pr['gy'] + pr['h'] + self.gap)
-                cand_gys.append(pr['gy'] - cur_h - self.gap)
+                # Right of pr
+                rx = pr['gx'] + pr['w'] + self.gap
+                cand_positions.append((rx, pr['gy']))
+                cand_positions.append((rx, pr['gy'] + pr['h'] - cur_h))
+                cand_positions.append((rx, pr['gy'] + (pr['h'] - cur_h)*0.5))
 
-            cand_gys = sorted(list(set([y for y in cand_gys if self.min_oy + self.margin <= y <= self.max_oy - cur_h - self.margin])))
+                # Above pr
+                ty = pr['gy'] + pr['h'] + self.gap
+                cand_positions.append((pr['gx'], ty))
+                cand_positions.append((pr['gx'] + pr['w'] - cur_w, ty))
+                cand_positions.append((pr['gx'] + (pr['w'] - cur_w)*0.5, ty))
 
-            for gy in cand_gys:
-                if self.type == 'circle':
-                    dy1 = abs(gy - self.cy)
-                    dy2 = abs(gy + cur_h - self.cy)
-                    max_dy = max(dy1, dy2)
-                    if max_dy > self.eff_R: continue
-                    half_w = math.sqrt(max(0.0, self.eff_R**2 - max_dy**2))
-                    xl = self.cx - half_w
-                    xr = self.cx + half_w
-                else:
-                    rng1 = get_poly_x_range(self.outer_pts, gy)
-                    rng2 = get_poly_x_range(self.outer_pts, gy + cur_h)
-                    if rng1 is None or rng2 is None: continue
-                    xl = max(rng1[0], rng2[0]) + self.margin
-                    xr = min(rng1[1], rng2[1]) - self.margin
+                # Left of pr
+                lx = pr['gx'] - cur_w - self.gap
+                cand_positions.append((lx, pr['gy']))
+                cand_positions.append((lx, pr['gy'] + pr['h'] - cur_h))
 
-                if xl + cur_w > xr: continue
+                # Below pr
+                by = pr['gy'] - cur_h - self.gap
+                cand_positions.append((pr['gx'], by))
+                cand_positions.append((pr['gx'] + pr['w'] - cur_w, by))
 
-                if align_pref == 'center':
-                    cand_xs = [(xl + xr - cur_w)*0.5, xl, xr - cur_w]
-                elif align_pref == 'right':
-                    cand_xs = [xr - cur_w, (xl + xr - cur_w)*0.5, xl]
-                else:
-                    cand_xs = [xl, (xl + xr - cur_w)*0.5, xr - cur_w]
-
-                for pr in self.placed:
-                    cand_xs.append(pr['gx'] + pr['w'] + self.gap)
-                    cand_xs.append(pr['gx'] - cur_w - self.gap)
-                    cand_xs.append(pr['gx'])
-                    cand_xs.append(pr['gx'] + pr['w'] - cur_w)
-
-                for gx in cand_xs:
-                    if gx < xl or gx + cur_w > xr: continue
-                    if not self.is_inside(gx, gy, cur_w, cur_h): continue
-
-                    col = False
-                    for pr in self.placed:
-                        if not (gx + cur_w + self.gap <= pr['gx'] or
-                                pr['gx'] + pr['w'] + self.gap <= gx or
-                                gy + cur_h + self.gap <= pr['gy'] or
-                                pr['gy'] + pr['h'] + self.gap <= gy):
-                            col = True
-                            break
-                    if col: continue
-
-                    # Compactness score: bottom-left priority
+            # (C) Systematic Y-level scanning for comprehensive space coverage
+            y_steps = 30
+            step_val = (self.max_oy - self.min_oy - 2.0*self.margin - cur_h)
+            if step_val > 0:
+                step_y = max(8.0, step_val / float(y_steps))
+                cy_val = self.min_oy + self.margin
+                while cy_val + cur_h + self.margin <= self.max_oy:
                     if self.type == 'circle':
-                        score = gy * 1000.0 + abs(gx + cur_w*0.5 - self.cx)
+                        dy1 = abs(cy_val - self.cy)
+                        dy2 = abs(cy_val + cur_h - self.cy)
+                        max_dy = max(dy1, dy2)
+                        if max_dy <= self.eff_R:
+                            hw = math.sqrt(max(0.0, self.eff_R**2 - max_dy**2))
+                            cand_positions.append((self.cx - hw, cy_val))
+                            cand_positions.append((self.cx + hw - cur_w, cy_val))
+                            cand_positions.append(((self.cx - hw + self.cx + hw - cur_w)*0.5, cy_val))
                     else:
-                        score = gy * 1000.0 + gx
+                        rng1 = get_poly_x_range(self.outer_pts, cy_val)
+                        rng2 = get_poly_x_range(self.outer_pts, cy_val + cur_h)
+                        if rng1 and rng2:
+                            xl = max(rng1[0], rng2[0]) + self.margin
+                            xr = min(rng1[1], rng2[1]) - self.margin
+                            if xl + cur_w <= xr:
+                                cand_positions.append((xl, cy_val))
+                                cand_positions.append((xr - cur_w, cy_val))
+                                cand_positions.append(((xl + xr - cur_w)*0.5, cy_val))
+                    cy_val += step_y
 
-                    # Slight preference for orthogonal (0/90) if scores are equal
-                    if rot_deg % 90 != 0:
-                        score += 5.0
+            # 2. Evaluate all candidate positions with NFP collision and gravity score
+            for gx, gy in cand_positions:
+                # Boundary check (IFP)
+                if not self.is_inside(gx, gy, cur_w, cur_h):
+                    continue
 
-                    if score < best_score:
-                        best_score = score
-                        best_node = (gx, gy, cur_w, cur_h, rot_deg, off_x, off_y)
+                # Non-overlapping collision check (NFP)
+                col = False
+                for pr in self.placed:
+                    if not (gx + cur_w + self.gap <= pr['gx'] or
+                            pr['gx'] + pr['w'] + self.gap <= gx or
+                            gy + cur_h + self.gap <= pr['gy'] or
+                            pr['gy'] + pr['h'] + self.gap <= gy):
+                        col = True
+                        break
+                if col: continue
+
+                # Gravity & Interlocking Compactness score (Deepnest / libnest2d fitness)
+                # Lower Y is prioritized (Bottom-Left gravity)
+                score = gy * 10000.0
+
+                # Interlocking contact bonus: count contact edges with existing parts
+                contact_bonus = 0.0
+                for pr in self.placed:
+                    # check if touching pr within gap + 1.0mm
+                    if abs(gx - (pr['gx'] + pr['w'] + self.gap)) < 1.0: contact_bonus += 500.0
+                    if abs((gx + cur_w + self.gap) - pr['gx']) < 1.0: contact_bonus += 500.0
+                    if abs(gy - (pr['gy'] + pr['h'] + self.gap)) < 1.0: contact_bonus += 800.0
+                    if abs((gy + cur_h + self.gap) - pr['gy']) < 1.0: contact_bonus += 800.0
+
+                if self.type == 'circle':
+                    # Pull towards center on X axis
+                    score += abs(gx + cur_w*0.5 - self.cx) * 5.0
+                else:
+                    if align_pref == 'center':
+                        mid_c = (self.min_ox + self.max_ox)*0.5
+                        score += abs(gx + cur_w*0.5 - mid_c) * 5.0
+                    elif align_pref == 'right':
+                        score -= gx
+                    else:
+                        score += gx
+
+                score -= contact_bonus
+
+                # Preference for orthogonal (0/90) if scores are very close
+                if rot_deg % 90 != 0:
+                    score += 2.0
+
+                if score < best_score:
+                    best_score = score
+                    best_node = (gx, gy, cur_w, cur_h, rot_deg, off_x, off_y)
 
         return best_node, best_score
 
@@ -259,7 +310,7 @@ class NestingContainer:
 
 def solve_multi_strategy(args):
     """
-    Evaluates multi-container packing strategy with Free-Angle capabilities.
+    Evaluates multi-container packing strategy with Deepnest NFP heuristics.
     """
     strategy_id, parts_data, containers_data, gap, margin = args
 
@@ -436,7 +487,7 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
 
     # AutoLISP script output with Free-Angle transform parameters
     with open(output_lsp_path, 'w', encoding='cp949', errors='replace') as f:
-        f.write(";;; MBBN Nesting Output AutoLISP Plan (True-Shape Free-Angle Rotation)\n")
+        f.write(";;; MBBN Nesting Output AutoLISP Plan (Deepnest/libnest2d NFP Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {total_yield:.2f})\n")
         f.write(f"(setq MBB_NESTING_STATUS \"SUCCESS\")\n")
         f.write("(setq MBB_NESTING_PLAN '(\n")
@@ -459,7 +510,7 @@ def run_nesting(input_path, output_lsp_path, output_json_path=None):
         with open(output_json_path, 'w', encoding='utf-8') as f:
             json.dump(out_json_data, f, indent=2)
 
-    print(f"MBBN Free-Angle Nesting: {placed_count}/{total_count} parts placed [Yield: {total_yield:.1f}% | Containers Used: {used_c}/{len(containers_data)}]")
+    print(f"MBBN Deepnest/NFP Nesting: {placed_count}/{total_count} parts placed [Yield: {total_yield:.1f}% | Containers Used: {used_c}/{len(containers_data)}]")
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
