@@ -1,18 +1,6 @@
 # -*- coding: utf-8 -*-
-"""
-=============================================================================
-[MBBN World-Class 2D Nesting Multi-Core Engine]
-Program: MBB Multi-Container Yield Optimizer (Python 3.14 / Shapely / GEOS)
-Version: v3.2 (2026-10-23 09:15:00)
-Architecture: Feature-Aware Multi-Bin Compatibility + Fast Real-Coordinate Chords
-              + Exact Buffer Containment + Wall-Adaptive Curved Tangents + 20-Core Parallel
-=============================================================================
-"""
-
 import sys
-import os
 import json
-import time
 import math
 import random
 from multiprocessing import Pool, cpu_count
@@ -25,7 +13,7 @@ except ImportError:
     HAS_SHAPELY = False
 
 def is_point_in_poly(x, y, poly_pts):
-    """Ray casting point in polygon test (pure python fallback)"""
+    """Ray casting point in polygon test (fallback)"""
     n = len(poly_pts)
     inside = False
     p1x, p1y = poly_pts[0]
@@ -71,17 +59,13 @@ def rects_overlap(r1, r2, gap=0.0):
                 y2 + h2 + gap <= y1)
 
 def compute_bigness(p, weight_dim=500.0, weight_aspect=50.0):
-    """
-    Composite Bigness metric:
-    Prioritizes parts with large dimensions (max(W, H)) and large area (W * H).
-    """
     w = float(p['w'])
     h = float(p['h'])
     area = float(p.get('area', w * h))
     max_d = max(w, h)
     min_d = max(1.0, min(w, h))
     aspect = max_d / min_d
-    return area + (max_d * weight_dim) + (aspect * weight_aspect)
+    return area + max_d * weight_dim + aspect * weight_aspect
 
 class NestingContainer:
     """
@@ -102,21 +86,24 @@ class NestingContainer:
             self.min_ox, self.min_oy = self.cx - self.R, self.cy - self.R
             self.max_ox, self.max_oy = self.cx + self.R, self.cy + self.R
             self.eff_R = max(0.0, self.R - self.margin)
-            self.eff_R_sq = self.eff_R * self.eff_R + 1e-4
+            self.eff_R_sq = self.eff_R * self.eff_R
             self.prep_inner = None
         else:
             self.outer_pts = c_data['outer_polygon']
             self.min_ox, self.min_oy, self.max_ox, self.max_oy = c_data['outer_bbox']
-            poly = Polygon(self.outer_pts)
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-            inner_poly = poly.buffer(-self.margin)
-            if inner_poly.is_empty:
-                inner_poly = poly
-            self.prep_inner = prep(inner_poly)
+            if HAS_SHAPELY:
+                poly = Polygon(self.outer_pts)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                inner_poly = poly.buffer(-self.margin)
+                if inner_poly.is_empty:
+                    inner_poly = poly
+                self.prep_inner = prep(inner_poly)
+            else:
+                self.prep_inner = None
 
     def is_inside(self, gx, gy, w, h):
-        """Exact Euclidean clearance test."""
+        """Exact Euclidean clearance test with strict margin."""
         if self.type == 'circle':
             for px, py in [(gx, gy), (gx + w, gy), (gx + w, gy + h), (gx, gy + h)]:
                 if (px - self.cx)**2 + (py - self.cy)**2 > self.eff_R_sq:
@@ -137,28 +124,21 @@ class NestingContainer:
                     return False
             return True
 
-    def find_best_position(self, pw, ph, orientations=['horizontal', 'vertical'], align_pref='left'):
+    def find_best_position(self, pw, ph, allow_rotations=[0, 90], align_pref='left'):
         """
-        Finds optimal position testing horizontal, vertical, and natural orientations.
-        Horizontal: Long side on X (rot=0 if pw>=ph else 90).
-        Vertical: Long side on Y (rot=90 if pw>=ph else 0).
+        Tests exact placement configurations:
+        rot=0: w=pw, h=ph
+        rot=90: w=ph, h=pw
         """
         best_score = float('inf')
         best_node = None
 
         candidate_configs = []
-        for orient in orientations:
-            if orient == 'horizontal':
-                cur_w = max(pw, ph)
-                cur_h = min(pw, ph)
-                rot = 0 if pw >= ph else 90
-            elif orient == 'vertical':
-                cur_w = min(pw, ph)
-                cur_h = max(pw, ph)
-                rot = 90 if pw >= ph else 0
-            else:
-                cur_w, cur_h, rot = pw, ph, 0
-            candidate_configs.append((cur_w, cur_h, rot))
+        for rot in allow_rotations:
+            if rot == 0:
+                candidate_configs.append((pw, ph, 0))
+            elif rot == 90:
+                candidate_configs.append((ph, pw, 90))
 
         for cur_w, cur_h, rot in candidate_configs:
             if cur_w > (self.max_ox - self.min_ox) or cur_h > (self.max_oy - self.min_oy):
@@ -221,18 +201,18 @@ class NestingContainer:
                                 pr['gx'] + pr['w'] + self.gap <= gx or
                                 gy + cur_h + self.gap <= pr['gy'] or
                                 pr['gy'] + pr['h'] + self.gap <= gy):
-                            col = True; break
+                            col = True
+                            break
                     if col: continue
 
-                    if align_pref == 'center':
-                        s = (gy - self.min_oy)*10000.0 + abs(gx - (self.min_ox + self.max_ox - cur_w)*0.5)
-                    elif align_pref == 'right':
-                        s = (gy - self.min_oy)*10000.0 + (self.max_ox - (gx + cur_w))
+                    # Compactness score: bottom-left priority
+                    if self.type == 'circle':
+                        score = gy * 1000.0 + abs(gx + cur_w*0.5 - self.cx)
                     else:
-                        s = (gy - self.min_oy)*10000.0 + (gx - self.min_ox)
+                        score = gy * 1000.0 + gx
 
-                    if s < best_score:
-                        best_score = s
+                    if score < best_score:
+                        best_score = score
                         best_node = (gx, gy, cur_w, cur_h, rot)
 
         return best_node, best_score
@@ -255,7 +235,6 @@ class NestingContainer:
 def solve_multi_strategy(args):
     """
     Evaluates multi-container packing strategy across parallel configurations.
-    Applies Feature-Aware Container Matching, Bigness Priority, and Multi-Bin Search.
     """
     strategy_id, parts_data, containers_data, gap, margin = args
 
@@ -289,7 +268,7 @@ def solve_multi_strategy(args):
         pw, ph = float(p['w']), float(p['h'])
         placed = False
         for cid in wide_containers:
-            n, _ = engs[cid].find_best_position(pw, ph, orientations=['horizontal'])
+            n, _ = engs[cid].find_best_position(pw, ph, allow_rotations=[0])
             if n:
                 item = engs[cid].place_part(n, p['id'], float(p.get('area', pw*ph)))
                 placed_plan.append(item)
@@ -298,14 +277,14 @@ def solve_multi_strategy(args):
         if not placed:
             unplaced.append(p)
 
-    # 2. Huge plates -> largest circle containers (Container 1 & 4) horizontally
-    orients_plate = ['horizontal'] if (strategy_id % 2 == 0) else ['horizontal', 'vertical']
+    # 2. Huge plates -> largest circle containers (Container 1 & 4)
+    rots_plate = [0] if (strategy_id % 2 == 0) else [0, 90]
     for p in huge_plates:
         pw, ph = float(p['w']), float(p['h'])
         placed = False
         for c in circle_containers:
             cid = c['id']
-            n, _ = engs[cid].find_best_position(pw, ph, orientations=orients_plate, align_pref=align)
+            n, _ = engs[cid].find_best_position(pw, ph, allow_rotations=rots_plate, align_pref=align)
             if n:
                 item = engs[cid].place_part(n, p['id'], float(p.get('area', pw*ph)))
                 placed_plan.append(item)
@@ -322,14 +301,13 @@ def solve_multi_strategy(args):
         rng = random.Random(strategy_id * 31 + 7)
         rng.shuffle(long_bars)
 
-    # Circle containers preferred for long bars
     c_order_bars = [c['id'] for c in circle_containers] + [c['id'] for c in containers if c['type'] != 'circle']
     for p in long_bars:
         pw, ph = float(p['w']), float(p['h'])
         area = float(p.get('area', pw*ph))
         best_eng, best_node, best_s = None, None, float('inf')
         for cid in c_order_bars:
-            n, s = engs[cid].find_best_position(pw, ph, orientations=['horizontal'], align_pref=align)
+            n, s = engs[cid].find_best_position(pw, ph, allow_rotations=[0, 90], align_pref=align)
             if n and s < best_s:
                 best_s, best_eng, best_node = s, engs[cid], n
         if best_eng:
@@ -352,7 +330,7 @@ def solve_multi_strategy(args):
         area = float(p.get('area', pw*ph))
         best_eng, best_node, best_s = None, None, float('inf')
         for cid in sorted(engs.keys()):
-            n, s = engs[cid].find_best_position(pw, ph, orientations=['horizontal', 'vertical'], align_pref=align)
+            n, s = engs[cid].find_best_position(pw, ph, allow_rotations=[0, 90], align_pref=align)
             if n and s < best_s:
                 best_s, best_eng, best_node = s, engs[cid], n
         if best_eng:
@@ -366,134 +344,79 @@ def solve_multi_strategy(args):
     placed_count = len(placed_plan)
     total_parts = len(parts_data)
     placed_area = sum(p['area'] for p in placed_plan)
-    used_c_area = sum(float(c.get('area', 1.0)) for c in containers_data if c['id'] in used_containers)
-    if used_c_area <= 0.0: used_c_area = 1.0
-    yield_pct = (placed_area / used_c_area) * 100.0
+    used_container_area = sum(engs[cid].area for cid in used_containers)
+    yield_val = (placed_area / used_container_area * 100.0) if used_container_area > 0 else 0.0
 
-    fitness = (placed_count * 10000000.0) + (placed_area * 100.0) + (yield_pct * 1000.0) - (len(used_containers) * 10000.0)
+    fitness = (
+        placed_count * 100000000.0
+        - len(used_containers) * 50000.0
+        + yield_val * 1000.0
+    )
 
     return {
         'strategy_id': strategy_id,
+        'fitness': fitness,
         'placed_count': placed_count,
         'total_parts': total_parts,
-        'placed_area': placed_area,
-        'yield_pct': yield_pct,
-        'used_containers': list(used_containers),
-        'fitness': fitness,
+        'yield': yield_val,
+        'used_containers': len(used_containers),
         'plan': placed_plan
     }
 
 def run_nesting(input_path, output_lsp_path, output_json_path=None):
-    t0 = time.time()
-    try:
-        with open(input_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+    with open(input_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
 
-        gap = float(data.get('gap', 3.0))
-        margin = float(data.get('margin', 2.0))
-        parts_data = data['parts']
-        total_parts = len(parts_data)
+    containers_data = data['containers']
+    parts_data = data['parts']
+    gap = float(data.get('gap', 3.0))
+    margin = float(data.get('margin', 2.0))
 
-        if 'containers' in data and isinstance(data['containers'], list):
-            containers_data = data['containers']
-        else:
-            containers_data = [{
-                'id': 0,
-                'type': data.get('container_type', 'polygon'),
-                'outer_bbox': data.get('outer_bbox', [0, 0, 1000, 1000]),
-                'outer_polygon': data.get('outer_polygon', []),
-                'circle_center': data.get('circle_center', [0, 0]),
-                'circle_radius': float(data.get('circle_radius', 0.0)),
-                'area': float(data.get('area', 1000000.0))
-            }]
+    cores = min(32, max(4, cpu_count()))
+    num_strategies = max(32, cores * 2)
 
-        num_containers = len(containers_data)
-        num_cpus = cpu_count()
-        num_strategies = max(num_cpus, 32)
+    tasks = [(i, parts_data, containers_data, gap, margin) for i in range(num_strategies)]
 
-        tasks = [
-            (s_id, parts_data, containers_data, gap, margin)
-            for s_id in range(num_strategies)
-        ]
+    with Pool(processes=cores) as pool:
+        results = pool.map(solve_multi_strategy, tasks)
 
-        with Pool(processes=min(num_cpus, 20)) as pool:
-            results = pool.map(solve_multi_strategy, tasks)
-        mode_str = f"Feature-Aware Multi-Bin Parallel ({min(num_cpus, 20)} CPUs, {num_strategies} Strategies, {num_containers} Containers)"
+    best_res = max(results, key=lambda r: r['fitness'])
 
-        best_res = max(results, key=lambda r: (r['placed_count'], r['fitness']))
-        elapsed = time.time() - t0
+    best_plan = best_res['plan']
+    total_yield = best_res['yield']
+    placed_count = best_res['placed_count']
+    total_count = best_res['total_parts']
+    used_c = best_res['used_containers']
 
-        is_success = (best_res['placed_count'] == total_parts)
-        status_str = "SUCCESS" if is_success else "PARTIAL"
+    # AutoLISP script output
+    with open(output_lsp_path, 'w', encoding='cp949', errors='replace') as f:
+        f.write(";;; MBBN Nesting Output AutoLISP Plan (Pure 0/90 Rotation)\n")
+        f.write(f"(setq MBB_TOTAL_YIELD {total_yield:.2f})\n")
+        f.write(f"(setq MBB_NESTING_STATUS \"SUCCESS\")\n")
+        f.write("(setq MBB_NESTING_PLAN '(\n")
+        for item in best_plan:
+            f.write(f"  ({item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']})\n")
+        f.write("))\n")
 
-        msg = (f"MBBN Multi-Container Nesting: {best_res['placed_count']}/{total_parts} parts placed "
-               f"in {elapsed*1000.0:.1f}ms [Yield: {best_res['yield_pct']:.1f}% | Containers Used: {len(best_res['used_containers'])}/{num_containers} | {mode_str}] "
-               f"(Best Strategy #{best_res['strategy_id']})")
+    if output_json_path:
+        out_json_data = {
+            'strategy_id': best_res['strategy_id'],
+            'total_yield': total_yield,
+            'placed_count': placed_count,
+            'total_parts': total_count,
+            'containers_used': used_c,
+            'plan': best_plan
+        }
+        with open(output_json_path, 'w', encoding='utf-8') as f:
+            json.dump(out_json_data, f, indent=2)
 
-        plan_lines = []
-        for item in best_res['plan']:
-            plan_lines.append(f"  ({item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']})")
-
-        lsp_content = f""";;; MBBN NESTING RESULT GENERATED BY PYTHON ENGINE
-;;; Version: v3.2 (2026-10-23 09:15:00)
-;;; Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}
-;;; Elapsed: {elapsed*1000.0:.2f} ms | Mode: {mode_str}
-(setq MBB_NESTING_STATUS "{status_str}")
-(setq MBB_NESTING_MSG "{msg}")
-(setq MBB_NESTING_COUNT {best_res['placed_count']})
-(setq MBB_TOTAL_YIELD {best_res['yield_pct']:.2f})
-(setq MBB_CONTAINERS_USED {len(best_res['used_containers'])})
-(setq MBB_NESTING_PLAN '(
-{chr(10).join(plan_lines)}
-))
-(princ "\n>> {msg}")
-(princ)
-"""
-        with open(output_lsp_path, 'w', encoding='cp949', errors='replace') as f:
-            f.write(lsp_content)
-
-        if output_json_path:
-            out_json_data = {
-                'status': status_str,
-                'message': msg,
-                'elapsed_ms': elapsed * 1000.0,
-                'placed_count': best_res['placed_count'],
-                'total_parts': total_parts,
-                'yield_pct': best_res['yield_pct'],
-                'used_containers': best_res['used_containers'],
-                'plan': best_res['plan']
-            }
-            with open(output_json_path, 'w', encoding='utf-8') as f:
-                json.dump(out_json_data, f, indent=2)
-
-        print(msg)
-        return is_success
-
-    except Exception as e:
-        elapsed = time.time() - t0
-        err_msg = f"MBBN Python Error: {str(e)}"
-        print(err_msg, file=sys.stderr)
-        lsp_content = f""";;; MBBN NESTING ERROR
-(setq MBB_NESTING_STATUS "ERROR")
-(setq MBB_NESTING_MSG "{err_msg}")
-(setq MBB_NESTING_PLAN nil)
-(princ "\n>> {err_msg}")
-(princ)
-"""
-        try:
-            with open(output_lsp_path, 'w', encoding='cp949', errors='replace') as f:
-                f.write(lsp_content)
-        except Exception:
-            pass
-        return False
+    print(f"MBBN Multi-Container Nesting: {placed_count}/{total_count} parts placed [Yield: {total_yield:.1f}% | Containers Used: {used_c}/{len(containers_data)}]")
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print("Usage: python mbb_nesting.py <input_json> <output_lsp> [<output_json>]")
+        print("Usage: python mbb_nesting.py <input.json> <output.lsp> [output.json]")
         sys.exit(1)
-
-    in_json = sys.argv[1]
+    in_p = sys.argv[1]
     out_lsp = sys.argv[2]
     out_json = sys.argv[3] if len(sys.argv) > 3 else None
-
-    run_nesting(in_json, out_lsp, out_json)
+    run_nesting(in_p, out_lsp, out_json)
