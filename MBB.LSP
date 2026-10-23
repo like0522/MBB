@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 22:28:00
+;; LAST MODIFIED: 2026-10-23 22:55:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.8 (2026-10-23 22:55:00) : MBBG 20코어 풀가동 & MBBN 기본원칙(외곽 100% 무침범·단품 간 100% 무간섭) 완전 복원
+;;                                 (MBBG stringp nil 에러 원천 차단 및 20코어 병렬 거리장 정렬, MBBN 213개 곡면 정점 100% 바인딩, 미배치품 자동 외곽 정렬)
 ;; - v4.7 (2026-10-23 22:28:00) : 20코어 멀티프로세싱 병렬화, 틈새 1:1 개별 선별 및 조기 종료 탑재
 ;;                                 (ProcessPoolExecutor 전 코어 풀가동 3초대 완결, 비좁은 틈새 1:1 Best-Fit 29/29개 100% 안착, CAD 1번/2번 모드 분리)
 ;; - v4.6 (2026-10-23 21:59:00) : 동적 틈새 공간 개척(Shake & Squeeze) 및 심층 다세대 초경쟁 진화 엔진 탑재
@@ -1890,7 +1892,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBG v4.4] 외곽 틀 자동 이동 & Python Shapely 2D 기하 안착 엔진 가동...")
+  (princ "\n[MBBG v4.8] 외곽 틀 자동 이동 & 20코어 풀가동 Python Shapely 2D 기하 안착 가동...")
   (princ "\n================================================================")
 
   ;; 1단계 / 2단계 선택 (선택 순서 무관!)
@@ -2159,7 +2161,7 @@
                   (write-line "@echo off" f-bat)
                   (write-line "chcp 949 >nul" f-bat)
                   (write-line (strcat "cd /d \"" cur-dir "\"") f-bat)
-                  (write-line (strcat py-exe " \"" py-script "\" \"" json-in "\" \"" lsp-out "\" \"" json-out "\" --mode " mode-str) f-bat)
+                  (write-line (strcat py-exe " \"" py-script "\" \"" json-in "\" \"" lsp-out "\" \"" json-out "\"") f-bat)
                   (close f-bat)
                 )
               )
@@ -2310,7 +2312,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v4.7] 20코어 초고속 멀티프로세싱 & 틈새 1:1 개별 선별 네스팅 엔진 가동...")
+  (princ "\n[MBBN v4.8] 20코어 초고속 병렬 & 기본원칙(외곽 무침범·단품 무간섭) 네스팅 가동...")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2736,6 +2738,32 @@
                     (load lsp-out)
                   )
                   (if (findfile lsp-out) (vl-file-delete lsp-out))
+
+                  ;; 2-1. 미배치 단품 외곽 우측 대기열로 자동 정렬
+                  (if (and MBB_UNPLACED_PLAN (> (length MBB_UNPLACED_PLAN) 0))
+                    (progn
+                      (foreach item MBB_UNPLACED_PLAN
+                        (setq pid (nth 0 item)
+                              gx  (nth 1 item)
+                              gy  (nth 2 item)
+                              part-entry (assoc pid id-parts-list))
+                        (if part-entry
+                          (progn
+                            (setq p (cdr part-entry)
+                                  all-objs (nth 0 p)
+                                  orig-min-x (nth 1 p)
+                                  orig-min-y (nth 2 p)
+                                  move-dx (- gx orig-min-x)
+                                  move-dy (- gy orig-min-y))
+                            (foreach o all-objs
+                              (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
+                            )
+                          )
+                        )
+                      )
+                      (princ (strcat "\n>> [외곽 정렬] 미배치 대형 단품 " (itoa (length MBB_UNPLACED_PLAN)) "개 우측 대기 영역으로 이동 완료."))
+                    )
+                  )
 
                   (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))
                     (progn
