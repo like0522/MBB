@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 14:58:00
+;; LAST MODIFIED: 2026-10-23 15:35:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.8 (2026-10-23 15:35:00) : 동일 부품 세트별 일괄 격자 배열(Set-Based Grid Packing) 및 원형 파이프 대칭 중심 정렬 완결
+;;                                 (단품 흩뿌리기 원천 차단, 동일 치수 세트별 나란한 바둑판/빗살무늬 일렬 정렬, 원형 파이프 중앙 대칭 안착, 0 오버행/0 충돌)
 ;; - v3.7.1 (2026-10-23 14:58:00) : AutoLISP let 문법 호환성 수정 (progn/setq 및 cur-ang 로컬 변수 적용)
 ;; - v3.7 (2026-10-23 14:50:00) : MBBN 직교 0/90도 고정, 외곽 완전 내접(Margin), 0% 무충돌 및 사후 검토/간격조정(Relaxation) 루프 탑재
 ;;                                 (CAD 좌표/회전 100% 정밀 실측 동기화, 문자 정방향 0/90도 보정, 미배치 단품 우측 버퍼 구역 자동 단정 정렬)
@@ -2219,7 +2221,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.7] 형상 친화도 기반 전역 수율 극대화 2D 네스팅 (NFP / Deepnest & 사후 검토 루프)")
+  (princ "\n[MBBN v3.8] 형상 친화도 기반 전역 수율 극대화 2D 네스팅 (NFP / Deepnest & 사후 검토 루프)")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2822,7 +2824,7 @@
                       )
 ;;; [END: CURRENT ACTIVE - v3.7 MODIFIED]
                       (princ "\n================================================================")
-                      (princ (strcat "\n>> [MBBN v3.7 네스팅 완료] 총 " (itoa (length parts-list)) "개 단품 중 " 
+                      (princ (strcat "\n>> [MBBN v3.8 네스팅 완료] 총 " (itoa (length parts-list)) "개 단품 중 " 
                                      (itoa (length MBB_NESTING_PLAN)) "개 컨테이너 완벽 배치 완료!"))
                       (if (and MBB_UNPLACED_COUNT (> MBB_UNPLACED_COUNT 0))
                         (princ (strcat "\n   - 미배치 단품: " (itoa MBB_UNPLACED_COUNT) "개 (컨테이너 용량 초과로 우측 버퍼 구역 단정 정렬 완료)"))
