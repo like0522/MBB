@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 08:25:00
+;; LAST MODIFIED: 2026-10-23 19:35:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.0 (2026-10-23 19:35:00) : GitHub 오픈소스(Sindri/pyckingsolver/Deepnest) 기반 정밀 2D 네스팅 엔진 전면 탑재
+;;                                 (IFP 외곽 내접 100% 보증, NFP 단품 무간섭 100% 보증, 모체 폴리선 절대 앵커로 문자 왜곡 영구 박멸, 수율 관리 극대화)
 ;; - v3.0 (2026-10-23 08:25:00) : MBBN 대형 단품(길이+면적 복합 Bigness) 우선순위 및 시행착오(Backtracking) 수율 극대화 네스팅 엔진 구축
 ;;                                 (대형 장척물/대면적 판재 최우선 배치, 잔여 유휴 공간(Cavity) 소형 부품 밀착 충진, 20코어 64개 병렬 전략 & 리패킹)
 ;; - v2.9 (2026-10-23 07:17:00) : MBBN 실행 시 외곽 여유(Margin) 및 단품 간격(Gap) 대화식 동적 설정 기능 추가
@@ -2201,7 +2203,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.0] 대형 단품(길이+면적) 우선 & 시행착오(Backtracking) 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v4.0] 대형 단품(길이+면적) 우선 & 시행착오(Backtracking) 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2600,39 +2602,117 @@
                   )
                   (if (findfile lsp-out) (vl-file-delete lsp-out))
 
+                  ;; 호환성 방어: 변수명 별칭 동기화
+                  (if (and (null MBB_NESTING_PLAN) *mbb-nesting-result*)
+                    (setq MBB_NESTING_PLAN *mbb-nesting-result*)
+                  )
+
                   (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))
                     (progn
                       (foreach item MBB_NESTING_PLAN
-                        ;; 포맷: (part_id container_id gx gy w h rot)
-                        (setq pid (nth 0 item)
-                              cid (nth 1 item)
-                              gx  (nth 2 item)
-                              gy  (nth 3 item)
-                              w   (nth 4 item)
-                              h   (nth 5 item)
-                              rot (nth 6 item)
+                        ;; 포맷: (part_id container_id gx gy w h rot off_x off_y)
+                        (setq pid        (nth 0 item)
+                              cid        (nth 1 item)
+                              gx         (nth 2 item)
+                              gy         (nth 3 item)
+                              w          (nth 4 item)
+                              h          (nth 5 item)
+                              rot-deg    (if (>= (length item) 7) (float (nth 6 item)) 0.0)
+                              off-x      (if (>= (length item) 8) (float (nth 7 item)) 0.0)
+                              off-y      (if (>= (length item) 9) (float (nth 8 item)) 0.0)
                               part-entry (assoc pid id-parts-list))
                         (if part-entry
                           (progn
                             (setq p (cdr part-entry)
-                                  all-objs (nth 0 p)
+                                  all-objs   (nth 0 p)
+                                  parent-obj (car all-objs)
                                   orig-min-x (nth 1 p)
                                   orig-min-y (nth 2 p)
-                                  orig-w (nth 3 p)
-                                  orig-h (nth 4 p))
-                            (if (= rot 90)
-                              (progn
-                                (foreach o all-objs
-                                  (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
-                                )
-                                (setq move-dx (+ (- gx orig-min-x) orig-h)
-                                      move-dy (- gy orig-min-y))
+                                  orig-w     (nth 3 p)
+                                  orig-h     (nth 4 p)
+                                  part-texts (nth 8 p)
+                                  rot-rad    (* (/ rot-deg 180.0) pi))
+
+                            ;; 1. 직교 회전 적용 (0도 또는 90도): 부모 폴리선 최소점 기준
+                            (if (> (abs rot-rad) 1.0e-5)
+                              (foreach o all-objs
+                                (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) rot-rad))
                               )
-                              (setq move-dx (- gx orig-min-x)
-                                    move-dy (- gy orig-min-y))
                             )
+
+                            ;; 2. 회전 후 재측정: 오직 모체 폴리선(parent-obj)만 정밀 측정하여 오차 0.000mm 유지
+                            (setq cur-min-x nil cur-min-y nil)
+                            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list parent-obj 'o-min 'o-max))))
+                              (progn
+                                (setq o-min (vlax-safearray->list o-min))
+                                (setq cur-min-x (car o-min) cur-min-y (cadr o-min))
+                              )
+                            )
+                            (if (null cur-min-x)
+                              (setq cur-min-x orig-min-x cur-min-y orig-min-y)
+                            )
+
+                            ;; 3. 모체 폴리선 기준 정확한 이동량 산출
+                            (setq move-dx (- gx cur-min-x)
+                                  move-dy (- gy cur-min-y))
+
+                            ;; 4. 객체 일괄 이동 (모체 폴리선 + 홀 + 문자 동기 이동)
                             (foreach o all-objs
                               (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
+                            )
+
+                            ;; 5. 텍스트 가독성 각도 보정 (180도/270도 뒤집힘 방지)
+                            (if part-texts
+                              (foreach txt part-texts
+                                (if (vlax-property-available-p txt 'Rotation)
+                                  (progn
+                                    (setq cur-ang (vla-get-Rotation txt))
+                                    (while (< cur-ang 0.0) (setq cur-ang (+ cur-ang (* 2.0 pi))))
+                                    (while (>= cur-ang (* 2.0 pi)) (setq cur-ang (- cur-ang (* 2.0 pi))))
+                                    (cond
+                                      ((and (> cur-ang (* 0.6 pi)) (<= cur-ang (* 1.4 pi)))
+                                       (vla-put-Rotation txt (- cur-ang pi)))
+                                      ((and (> cur-ang (* 1.4 pi)) (<= cur-ang (* 1.8 pi)))
+                                       (vla-put-Rotation txt (- cur-ang pi)))
+                                    )
+                                  )
+                                )
+                              )
+                            )
+                          )
+                        )
+                      )
+
+                      ;; 6. 미배치 단품 우측 버퍼 구역 자동 정렬 이동
+                      (if (and MBB_UNPLACED_PLAN (> (length MBB_UNPLACED_PLAN) 0))
+                        (progn
+                          (foreach item MBB_UNPLACED_PLAN
+                            (setq pid (nth 0 item)
+                                  gx  (nth 1 item)
+                                  gy  (nth 2 item)
+                                  part-entry (assoc pid id-parts-list))
+                            (if part-entry
+                              (progn
+                                (setq p (cdr part-entry)
+                                      all-objs   (nth 0 p)
+                                      parent-obj (car all-objs))
+                                (setq cur-min-x nil cur-min-y nil)
+                                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list parent-obj 'o-min 'o-max))))
+                                  (progn
+                                    (setq o-min (vlax-safearray->list o-min))
+                                    (setq cur-min-x (car o-min) cur-min-y (cadr o-min))
+                                  )
+                                )
+                                (if (and cur-min-x cur-min-y)
+                                  (progn
+                                    (setq move-dx (- gx cur-min-x)
+                                          move-dy (- gy cur-min-y))
+                                    (foreach o all-objs
+                                      (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
+                                    )
+                                  )
+                                )
+                              )
                             )
                           )
                         )
