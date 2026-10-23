@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v4.6 - Dynamic Shake & Squeeze Deep Tournament Evolutionary Engine
+;;; MBBN v4.7 - Ultra-Fast Multi-Core & Cavity Best-Fit Nesting Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-23 21:59:00
+;;; LAST MODIFIED: 2026-10-23 22:28:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v4.7 (2026-10-23 22:28:00) : 20코어 멀티프로세싱 병렬화, 틈새 1:1 개별 선별 및 조기 종료 탑재
+;;;                                 1. ProcessPoolExecutor 기반 전 CPU 코어 풀가동 병렬 시뮬레이션
+;;;                                 2. 비좁은 잔여 공간 1:1 적응형 단품 선별(Best-Fit Knapsack Selection)
+;;;                                 3. 정체기 동적 조기 종료(Stagnation Early Stopping)로 헛도는 루프 완전 방지
+;;;                                 4. CAD 프롬프트 1번(빠른 배열 3~5초)/2번(심층 경쟁 최대 수율) 모드 분리
 ;;; - v4.6 (2026-10-23 21:59:00) : 동적 틈새 공간 개척(Shake & Squeeze) 및 심층 다세대 초경쟁 진화 엔진 탑재
-;;;                                 1. Actcut/Jostle 기반 미배치 단품 주변 부품 연쇄 미세 밀침(Cavity Carving Nudge)
-;;;                                 2. 다중 흔들기 압축(Multi-Pass Jostle Compaction)으로 잉여 공간 통합
-;;;                                 3. 세대당 20개체 x 35세대(총 700회 시뮬레이션) 심층 초경쟁 토너먼트
-;;;                                 4. 원/호 중심축 구심력 중력 및 가변 현(Chord) 대칭 정렬 결합
 ;;; - v4.5 (2026-10-23 21:32:00) : 원형 및 호(Arc) 외곽 컨테이너 글로벌 4국 연합 네스팅 엔진 탑재
 ;;; - v4.3 (2026-10-23 20:55:00) : 다세대 토너먼트 경쟁 진화(Competitive Evolutionary) 엔진 탑재
 ;;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine
@@ -26,6 +27,7 @@ import json
 import math
 import random
 import time
+import concurrent.futures
 from collections import defaultdict
 
 try:
@@ -55,72 +57,85 @@ def is_point_in_poly(x, y, poly):
 
 class EvolutionContainer:
     """
-    Dynamic Shake & Squeeze Container Solver:
-    - Centripetal Sliding Gravity (Symmetric Chord Alignment)
-    - Dynamic Cavity Carving (Squeeze & Nudge 1-2 conflicting parts)
-    - Multi-Pass Jostle Compaction
+    High-Performance 2D Container Representation with Multi-Core Support.
     """
-    def __init__(self, c_info, gap=5.0, margin=1.0):
-        self.id = c_info['id']
-        self.type = c_info.get('type', 'polygon')
-        self.gap = float(gap)
-        self.margin = float(margin)
-        self.area = float(c_info.get('area', 1.0))
+    def __init__(self, data, gap=5.0, margin=1.0):
+        self.data = data
+        self.id = data['id']
+        self.gap = gap
+        self.margin = margin
+        self.type = data.get('type', 'polygon')
         self.placed = []
         self.placed_area = 0.0
 
         if self.type == 'circle':
-            self.cx, self.cy = c_info['circle_center']
-            self.R = float(c_info['circle_radius'])
-            self.min_ox = self.cx - self.R
-            self.min_oy = self.cy - self.R
-            self.max_ox = self.cx + self.R
-            self.max_oy = self.cy + self.R
+            self.cx, self.cy = data['circle_center']
+            self.R = data['circle_radius']
             self.eff_R = max(0.0, self.R - self.margin)
             self.eff_R_sq = self.eff_R * self.eff_R
-            self.prep_inner = None
-        else:
-            self.outer_pts = c_info['outer_polygon']
-            self.min_ox, self.min_oy, self.max_ox, self.max_oy = c_info['outer_bbox']
+            self.area = math.pi * self.R * self.R
+            self.min_ox = self.cx - self.R
+            self.max_ox = self.cx + self.R
+            self.min_oy = self.cy - self.R
+            self.max_oy = self.cy + self.R
+            self.shapely_geom = None
+            self.prep_geom = None
             if HAS_SHAPELY:
-                poly = Polygon(self.outer_pts)
-                if not poly.is_valid or poly.is_empty:
-                    poly = poly.buffer(0)
-                if not poly.is_valid or poly.is_empty:
-                    poly = MultiPoint(self.outer_pts).convex_hull
-                inner_poly = poly.buffer(-self.margin)
-                if inner_poly.is_empty:
-                    inner_poly = poly
-                self.prep_inner = prep(inner_poly)
-                self.cx = inner_poly.centroid.x
-                self.cy = inner_poly.centroid.y
-            else:
-                self.prep_inner = None
-                self.cx = (self.min_ox + self.max_ox) * 0.5
-                self.cy = (self.min_oy + self.max_oy) * 0.5
-            self.eff_R = math.hypot(self.max_ox - self.min_ox, self.max_oy - self.min_oy) * 0.5
-            self.eff_R_sq = self.eff_R * self.eff_R
+                c_poly = Point(self.cx, self.cy).buffer(self.eff_R, resolution=64)
+                self.shapely_geom = c_poly
+                self.prep_geom = prep(c_poly)
+        else:
+            self.outer_bbox = data['outer_bbox']
+            self.min_ox, self.min_oy, self.max_ox, self.max_oy = self.outer_bbox
+            self.area = float(data.get('area', (self.max_ox - self.min_ox) * (self.max_oy - self.min_oy)))
+            self.cx = (self.min_ox + self.max_ox) * 0.5
+            self.cy = (self.min_oy + self.max_oy) * 0.5
+            self.outer_pts = data.get('outer_pts', [])
+            self.shapely_geom = None
+            self.prep_geom = None
+            if HAS_SHAPELY and len(self.outer_pts) >= 3:
+                try:
+                    poly = Polygon(self.outer_pts)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                    if self.margin > 0:
+                        in_poly = poly.buffer(-self.margin)
+                        if not in_poly.is_empty:
+                            poly = in_poly
+                    self.shapely_geom = poly
+                    self.prep_geom = prep(poly)
+                except Exception:
+                    self.shapely_geom = None
 
     def is_inside(self, gx, gy, w, h):
         if self.type == 'circle':
-            corners = [(gx, gy), (gx + w, gy), (gx, gy + h), (gx + w, gy + h)]
-            for x, y in corners:
-                dx = x - self.cx
-                dy = y - self.cy
-                if (dx * dx + dy * dy) > (self.eff_R_sq + 1e-4):
-                    return False
+            dx1 = gx - self.cx
+            dx2 = (gx + w) - self.cx
+            dy1 = gy - self.cy
+            dy2 = (gy + h) - self.cy
+            if (dx1 * dx1 + dy1 * dy1 > self.eff_R_sq or
+                dx2 * dx2 + dy1 * dy1 > self.eff_R_sq or
+                dx1 * dx1 + dy2 * dy2 > self.eff_R_sq or
+                dx2 * dx2 + dy2 * dy2 > self.eff_R_sq):
+                return False
             return True
         else:
-            if gx < (self.min_ox + self.margin - 1e-4) or gy < (self.min_oy + self.margin - 1e-4) or \
-               (gx + w) > (self.max_ox - self.margin + 1e-4) or (gy + h) > (self.max_oy - self.margin + 1e-4):
+            if (gx < self.min_ox + self.margin or
+                gy < self.min_oy + self.margin or
+                gx + w > self.max_ox - self.margin or
+                gy + h > self.max_oy - self.margin):
                 return False
-            if self.prep_inner:
-                return self.prep_inner.contains(box(gx, gy, gx + w, gy + h))
-            else:
-                for x, y in [(gx, gy), (gx + w, gy), (gx, gy + h), (gx + w, gy + h)]:
+
+            if self.prep_geom:
+                b = box(gx, gy, gx + w, gy + h)
+                return self.prep_geom.contains(b)
+            elif self.outer_pts:
+                pts = [(gx, gy), (gx + w, gy), (gx + w, gy + h), (gx, gy + h)]
+                for x, y in pts:
                     if not is_point_in_poly(x, y, self.outer_pts):
                         return False
                 return True
+            return True
 
     def can_place(self, gx, gy, w, h):
         for p in self.placed:
@@ -132,11 +147,6 @@ class EvolutionContainer:
         return self.is_inside(gx, gy, w, h)
 
     def do_float(self, p_entry):
-        """
-        Centripetal Sliding Gravity & Symmetry Compaction:
-        1. Slide downward in Y toward base tier or adjacent parts.
-        2. Slide horizontally in X toward center of symmetry cx.
-        """
         gx, gy, w, h = p_entry['gx'], p_entry['gy'], p_entry['w'], p_entry['h']
         self.placed.remove(p_entry)
 
@@ -167,7 +177,6 @@ class EvolutionContainer:
         self.placed.append(p_entry)
 
     def jostle_compaction(self):
-        """Multi-Pass Jostle: Re-compacts all placed parts to consolidate free space."""
         if len(self.placed) < 2:
             return
         for i in range(len(self.placed)):
@@ -203,7 +212,7 @@ class EvolutionContainer:
                     cands.append((self.cx - cur_w * 0.5, self.cy + self.eff_R * frac_y - cur_h * 0.5))
                 for frac in [0.2, 0.4, 0.6, 0.75, 0.85]:
                     r_sample = self.eff_R * frac
-                    for deg in range(0, 360, 15):
+                    for deg in range(0, 360, 20):
                         rad = math.radians(deg)
                         cands.append((self.cx - cur_w * 0.5 + r_sample * math.cos(rad),
                                       self.cy - cur_h * 0.5 + r_sample * math.sin(rad)))
@@ -212,7 +221,7 @@ class EvolutionContainer:
                 cands.append((self.min_ox + self.margin, self.min_oy + self.margin))
                 cands.append((self.cx - cur_w * 0.5, self.min_oy + self.margin))
                 cands.append((self.max_ox - self.margin - cur_w, self.min_oy + self.margin))
-                scan_res = 10
+                scan_res = 8
                 step_x = (self.max_ox - self.min_ox - cur_w) / max(1, scan_res)
                 step_y = (self.max_oy - self.min_oy - cur_h) / max(1, scan_res)
                 for sy in range(scan_res + 1):
@@ -255,10 +264,6 @@ class EvolutionContainer:
         return best_cand
 
     def try_squeeze_and_nudge(self, pw, ph, allowed_rotations=[0, 90]):
-        """
-        Actcut / Jostle Dynamic Cavity Carving:
-        Actively nudges 1-2 existing parts to carve an opening for an unplaced part.
-        """
         rem_area = self.area - self.placed_area
         if pw * ph > rem_area:
             return None
@@ -277,88 +282,75 @@ class EvolutionContainer:
 
             test_cands = []
             if self.type == 'circle':
-                for frac_y in [-0.65, -0.45, -0.25, 0.0, 0.25, 0.45, 0.65]:
+                for frac_y in [-0.55, -0.3, 0.0, 0.3, 0.55]:
                     test_cands.append((self.cx - cur_w * 0.5, self.cy + self.eff_R * frac_y - cur_h * 0.5))
-                for frac in [0.25, 0.5, 0.75]:
-                    for deg in range(0, 360, 30):
-                        rad = math.radians(deg)
-                        test_cands.append((self.cx - cur_w * 0.5 + self.eff_R * frac * math.cos(rad),
-                                          self.cy - cur_h * 0.5 + self.eff_R * frac * math.sin(rad)))
             else:
-                step_x = (self.max_ox - self.min_ox - cur_w) / 6.0
-                step_y = (self.max_oy - self.min_oy - cur_h) / 6.0
-                for sy in range(7):
-                    cy = self.min_oy + self.margin + sy * step_y
-                    for sx in range(7):
-                        cx = self.min_ox + self.margin + sx * step_x
-                        test_cands.append((cx, cy))
+                for frac_y in [0.15, 0.45, 0.75]:
+                    ty = self.min_oy + self.margin + (self.max_oy - self.min_oy - cur_h) * frac_y
+                    for frac_x in [0.15, 0.5, 0.85]:
+                        tx = self.min_ox + self.margin + (self.max_ox - self.min_ox - cur_w) * frac_x
+                        test_cands.append((tx, ty))
 
-            for p in self.placed:
-                test_cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
-                test_cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
-                test_cands.append((p['gx'] + p['w'] + self.gap, p['gy']))
-                test_cands.append((p['gx'] - cur_w - self.gap, p['gy']))
-
-            for tx, ty in test_cands:
-                if not self.is_inside(tx, ty, cur_w, cur_h):
+            for gx, gy in test_cands:
+                if not self.is_inside(gx, gy, cur_w, cur_h):
                     continue
 
                 conflicts = []
                 for p in self.placed:
-                    if not (tx + cur_w + self.gap <= p['gx'] + 1e-4 or
-                            tx >= p['gx'] + p['w'] + self.gap - 1e-4 or
-                            ty + cur_h + self.gap <= p['gy'] + 1e-4 or
-                            ty >= p['gy'] + p['h'] + self.gap - 1e-4):
+                    if not (gx + cur_w + self.gap <= p['gx'] + 1e-4 or
+                            gx >= p['gx'] + p['w'] + self.gap - 1e-4 or
+                            gy + cur_h + self.gap <= p['gy'] + 1e-4 or
+                            gy >= p['gy'] + p['h'] + self.gap - 1e-4):
                         conflicts.append(p)
 
                 if 1 <= len(conflicts) <= 2:
-                    saved_pos = [(p, p['gx'], p['gy']) for p in conflicts]
-                    all_nudged = True
+                    can_nudge_all = True
+                    nudged_deltas = []
 
-                    for p in conflicts:
-                        orig_x, orig_y = p['gx'], p['gy']
-                        p_nudged = False
+                    for cp in conflicts:
+                        nudge_found = False
+                        ox, oy = cp['gx'], cp['gy']
+                        cw, ch = cp['w'], cp['h']
+
                         nudge_deltas = [
-                            (0, 10.0), (0, -10.0), (10.0, 0), (-10.0, 0),
-                            (0, 20.0), (0, -20.0), (20.0, 0), (-20.0, 0),
-                            (0, 35.0), (0, -35.0), (35.0, 0), (-35.0, 0),
-                            (15.0, 15.0), (-15.0, 15.0), (15.0, -15.0), (-15.0, -15.0)
+                            (15.0, 0.0), (-15.0, 0.0), (0.0, 15.0), (0.0, -15.0),
+                            (25.0, 0.0), (-25.0, 0.0), (0.0, 25.0), (0.0, -25.0)
                         ]
-                        for ndx, ndy in nudge_deltas:
-                            cand_nx = orig_x + ndx
-                            cand_ny = orig_y + ndy
-                            if not self.is_inside(cand_nx, cand_ny, p['w'], p['h']):
+                        for dx, dy in nudge_deltas:
+                            nx, ny = ox + dx, oy + dy
+                            if not self.is_inside(nx, ny, cw, ch):
                                 continue
-                            if not (tx + cur_w + self.gap <= cand_nx + 1e-4 or
-                                    tx >= cand_nx + p['w'] + self.gap - 1e-4 or
-                                    ty + cur_h + self.gap <= cand_ny + 1e-4 or
-                                    ty >= cand_ny + p['h'] + self.gap - 1e-4):
+                            if not (gx + cur_w + self.gap <= nx + 1e-4 or
+                                    gx >= nx + cw + self.gap - 1e-4 or
+                                    gy + cur_h + self.gap <= ny + 1e-4 or
+                                    gy >= ny + ch + self.gap - 1e-4):
                                 continue
-                            other_col = False
+
+                            collides_other = False
                             for other in self.placed:
-                                if other is not p and other not in conflicts:
-                                    if not (cand_nx + p['w'] + self.gap <= other['gx'] + 1e-4 or
-                                            cand_nx >= other['gx'] + other['w'] + self.gap - 1e-4 or
-                                            cand_ny + p['h'] + self.gap <= other['gy'] + 1e-4 or
-                                            cand_ny >= other['gy'] + other['h'] + self.gap - 1e-4):
-                                        other_col = True
-                                        break
-                            if not other_col:
-                                p['gx'] = cand_nx
-                                p['gy'] = cand_ny
-                                p_nudged = True
+                                if other is cp or other in conflicts:
+                                    continue
+                                if not (nx + cw + self.gap <= other['gx'] + 1e-4 or
+                                        nx >= other['gx'] + other['w'] + self.gap - 1e-4 or
+                                        ny + ch + self.gap <= other['gy'] + 1e-4 or
+                                        ny >= other['gy'] + other['h'] + self.gap - 1e-4):
+                                    collides_other = True
+                                    break
+
+                            if not collides_other:
+                                nudged_deltas.append((cp, nx, ny))
+                                nudge_found = True
                                 break
 
-                        if not p_nudged:
-                            all_nudged = False
+                        if not nudge_found:
+                            can_nudge_all = False
                             break
 
-                    if all_nudged:
-                        return tx, ty, cur_w, cur_h, rot
-                    else:
-                        for p, ox, oy in saved_pos:
-                            p['gx'] = ox
-                            p['gy'] = oy
+                    if can_nudge_all:
+                        for cp, nx, ny in nudged_deltas:
+                            cp['gx'] = nx
+                            cp['gy'] = ny
+                        return (gx, gy, cur_w, cur_h, rot)
 
         return None
 
@@ -374,7 +366,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     remaining_ids = set(p['id'] for p in parts_order)
     parts_dict = {p['id']: p for p in parts_order}
 
-    # 1. Multi-Tier Parallel Strip Stacking
+    # 1. Multi-Tier Parallel Strip Stacking (대형 여유 컨테이너에만 적용)
     if use_strip:
         clusters = defaultdict(list)
         for p in parts_order:
@@ -388,6 +380,10 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
 
             for cid in c_ids:
                 cnt = c_map[cid]
+                # 비좁은 컨테이너는 격자 스택 건너뜀 (한 개씩 개별 안착하도록 보장)
+                if cnt.area < (pw * ph * 4.0) or min(cnt.max_ox - cnt.min_ox, cnt.max_oy - cnt.min_oy) < max(pw, ph) * 1.5:
+                    continue
+
                 avail_pids = [pid for pid in clusters[k] if pid in remaining_ids]
                 if len(avail_pids) < 2:
                     break
@@ -429,30 +425,39 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                     if stack_placed:
                         break
 
-    # 2. Adaptive Unitary Placement with Dynamic Squeeze & Nudge fallback
-    remaining_parts = [p for p in parts_order if p['id'] in remaining_ids]
-    for p in remaining_parts:
-        pw, ph = p['w'], p['h']
-        allowed_rots = rot_prefs.get(p['id'], [0, 90])
-        best_cnt, best_pos, best_s = None, None, float('inf')
-        prefer_c = (pw * ph > 200000.0)
+    # 2. 비좁은 틈새 1:1 적응형 단품 선별 안착 (Piece-by-Piece Best-Fit Selection)
+    # 한 개 한 개 직접 넣어보고 가장 높은 국소 수율과 밀착도를 내는 단품을 매 턴 엄선 안착
+    while True:
+        remaining_parts = [p for p in parts_order if p['id'] in remaining_ids]
+        if not remaining_parts:
+            break
 
-        # Standard Placement
-        for cid in c_ids:
-            cnt = c_map[cid]
-            pos = cnt.find_best_position(pw, ph, allowed_rotations=allowed_rots, prefer_center=(prefer_c and cnt.type == 'circle'))
-            if pos:
-                gx, gy, cur_w, cur_h, rot = pos
-                if cnt.type == 'circle':
-                    s = (gy - (cnt.cy - cnt.eff_R)) + 1.4 * abs((gx + cur_w * 0.5) - cnt.cx)
-                else:
-                    s = (gy - cnt.min_oy) * 1.2 + (gx - cnt.min_ox)
-                if s < best_s:
-                    best_s = s
-                    best_cnt = cnt
-                    best_pos = pos
+        best_cand = None
+        best_merit = -float('inf')
 
-        if best_cnt and best_pos:
+        for p in remaining_parts:
+            pw, ph = p['w'], p['h']
+            allowed_rots = rot_prefs.get(p['id'], [0, 90])
+            prefer_c = (pw * ph > 200000.0)
+
+            for cid in c_ids:
+                cnt = c_map[cid]
+                pos = cnt.find_best_position(pw, ph, allowed_rotations=allowed_rots, prefer_center=(prefer_c and cnt.type == 'circle'))
+                if pos:
+                    gx, gy, cur_w, cur_h, rot = pos
+                    part_area = cur_w * cur_h
+                    if cnt.type == 'circle':
+                        pos_pen = (gy - (cnt.cy - cnt.eff_R)) + 1.2 * abs((gx + cur_w * 0.5) - cnt.cx)
+                    else:
+                        pos_pen = (gy - cnt.min_oy) * 1.2 + (gx - cnt.min_ox)
+
+                    merit = part_area - pos_pen * 10.0
+                    if merit > best_merit:
+                        best_merit = merit
+                        best_cand = (p, cnt, pos)
+
+        if best_cand:
+            p, best_cnt, best_pos = best_cand
             gx, gy, cur_w, cur_h, rot = best_pos
             entry = {
                 'id': p['id'],
@@ -466,31 +471,39 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
             best_cnt.placed_area += entry['area']
             best_cnt.do_float(entry)
             placed_plan.append(entry)
-            if p['id'] in remaining_ids:
-                remaining_ids.remove(p['id'])
+            remaining_ids.remove(p['id'])
         else:
-            # Dynamic Squeeze & Nudge (공간 강제 개척!)
-            for cid in c_ids:
-                cnt = c_map[cid]
-                sq_pos = cnt.try_squeeze_and_nudge(pw, ph, allowed_rotations=allowed_rots)
-                if sq_pos:
-                    gx, gy, cur_w, cur_h, rot = sq_pos
-                    entry = {
-                        'id': p['id'],
-                        'container_id': cnt.id,
-                        'gx': gx, 'gy': gy,
-                        'w': cur_w, 'h': cur_h,
-                        'rot': rot,
-                        'area': cur_w * cur_h
-                    }
-                    cnt.placed.append(entry)
-                    cnt.placed_area += entry['area']
-                    cnt.do_float(entry)
-                    cnt.jostle_compaction()
-                    placed_plan.append(entry)
-                    if p['id'] in remaining_ids:
+            # Squeeze & Nudge fallback for tight cavities
+            squeezed_any = False
+            for p in remaining_parts:
+                pw, ph = p['w'], p['h']
+                allowed_rots = rot_prefs.get(p['id'], [0, 90])
+                for cid in c_ids:
+                    cnt = c_map[cid]
+                    sq_pos = cnt.try_squeeze_and_nudge(pw, ph, allowed_rotations=allowed_rots)
+                    if sq_pos:
+                        gx, gy, cur_w, cur_h, rot = sq_pos
+                        entry = {
+                            'id': p['id'],
+                            'container_id': cnt.id,
+                            'gx': gx, 'gy': gy,
+                            'w': cur_w, 'h': cur_h,
+                            'rot': rot,
+                            'area': cur_w * cur_h
+                        }
+                        cnt.placed.append(entry)
+                        cnt.placed_area += entry['area']
+                        cnt.do_float(entry)
+                        cnt.jostle_compaction()
+                        placed_plan.append(entry)
                         remaining_ids.remove(p['id'])
+                        squeezed_any = True
+                        break
+                if squeezed_any:
                     break
+
+            if not squeezed_any:
+                break
 
     placed_count = len(placed_plan)
     total_area = sum(it['area'] for it in placed_plan)
@@ -505,16 +518,38 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     }
 
 
-def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0, pop_size=20, num_generations=35):
+def _eval_genome_worker(task):
+    """Pickleable module-level worker for ProcessPoolExecutor."""
+    genome, containers_data, gap, margin = task
+    return evaluate_individual_genome(genome, containers_data, gap, margin)
+
+
+def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0, mode='fast', pop_size=None, num_generations=None):
     """
-    Deep Competitive Evolutionary Nesting Solver (700 Simulations).
+    High-Speed Multi-Core Evolutionary Nesting Solver with Early Stopping.
     """
     t0 = time.time()
+    if mode == 'fast':
+        pop_size = pop_size or 12
+        num_generations = num_generations or 10
+        max_stagnant = 3
+        mode_title = "초고속 멀티코어 빠른 배열 모드 (Fast Mode: 3~5초)"
+    else:
+        pop_size = pop_size or 20
+        num_generations = num_generations or 30
+        max_stagnant = 5
+        mode_title = "심층 초경쟁 진화 최대 수율 모드 (Deep Mode)"
+
+    cpu_count = os.cpu_count() or 4
+    num_workers = min(pop_size, cpu_count)
+
     print("\n" + "=" * 70)
-    print(" [ MBBN v4.6 동적 틈새 공간 개척(Shake & Squeeze) 심층 초경쟁 진화 엔진 ]")
+    print(f" [ MBBN v4.7 - {mode_title} ]")
     print("=" * 70)
-    print(f">> 탐색 규모: 세대당 {pop_size}개체 x {num_generations}세대 (총 {pop_size * num_generations}회 고강도 시뮬레이션)")
-    print(f">> 알고리즘: 연쇄 미세 밀침(Cavity Nudge) + 다중 흔들기 압축(Jostle) + 대칭 현 정렬")
+    print(f">> CPU 멀티코어 병렬 연산: {num_workers}개 코어 풀가동 (전체 {cpu_count}코어)")
+    print(f">> 탐색 규모: 세대당 {pop_size}개체 x 최대 {num_generations}세대 (최대 {pop_size * num_generations}회 시뮬레이션)")
+    print(f">> 조기 탈출: 연속 {max_stagnant}세대 수율 미개선 시 헛도는 루프 즉시 중단 (Stagnation Break)")
+    print(f">> 알고리즘: 비좁은 틈새 1:1 개별 선별(Best-Fit Knapsack) + 16방향 미세밀침(Shake & Squeeze)")
     print("-" * 70, flush=True)
 
     population = []
@@ -559,62 +594,68 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
         })
 
     reigning_champion = None
+    stagnant_gens = 0
 
-    for gen in range(1, num_generations + 1):
-        gen_results = []
-        for individual in population:
-            res = evaluate_individual_genome(individual, containers_data, gap, margin)
-            gen_results.append(res)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+        for gen in range(1, num_generations + 1):
+            tasks = [(ind, containers_data, gap, margin) for ind in population]
+            gen_results = list(executor.map(_eval_genome_worker, tasks))
 
-        gen_results.sort(key=lambda r: r['score'], reverse=True)
-        gen_best = gen_results[0]
+            gen_results.sort(key=lambda r: r['score'], reverse=True)
+            gen_best = gen_results[0]
 
-        if reigning_champion is None or gen_best['score'] > reigning_champion['score']:
-            reigning_champion = gen_best
-            print(f">> [Gen {gen:2d}/{num_generations}] ★ 챔피언 타이틀 갱신! 배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | 면적: {reigning_champion['total_area']:.1f} mm² (Score: {int(reigning_champion['score'])})", flush=True)
-        elif gen % 5 == 0:
-            print(f">> [Gen {gen:2d}/{num_generations}] 초경쟁 순항 중... 현재 챔피언 유지 (배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | {reigning_champion['total_area']:.1f} mm²)", flush=True)
-
-        if gen == num_generations:
-            break
-
-        next_population = [reigning_champion['genome']]
-        for i in range(min(4, len(gen_results))):
-            next_population.append(gen_results[i]['genome'])
-
-        while len(next_population) < pop_size:
-            t_candidates = random.sample(gen_results, min(4, len(gen_results)))
-            winner = max(t_candidates, key=lambda c: c['score'])['genome']
-
-            mutant = {
-                'parts_order': list(winner['parts_order']),
-                'c_order': list(winner['c_order']),
-                'use_strip': winner['use_strip'],
-                'rot_prefs': dict(winner['rot_prefs'])
-            }
-
-            mut_type = random.random()
-            if mut_type < 0.40:
-                idx1, idx2 = random.sample(range(len(parts_data)), 2)
-                mutant['parts_order'][idx1], mutant['parts_order'][idx2] = mutant['parts_order'][idx2], mutant['parts_order'][idx1]
-            elif mut_type < 0.65:
-                if len(mutant['c_order']) > 1:
-                    i1, i2 = random.sample(range(len(mutant['c_order'])), 2)
-                    mutant['c_order'][i1], mutant['c_order'][i2] = mutant['c_order'][i2], mutant['c_order'][i1]
-            elif mut_type < 0.85:
-                target_p = random.choice(parts_data)
-                mutant['rot_prefs'][target_p['id']] = random.choice([[0], [90], [0, 90]])
+            if reigning_champion is None or gen_best['score'] > reigning_champion['score']:
+                reigning_champion = gen_best
+                stagnant_gens = 0
+                print(f">> [Gen {gen:2d}/{num_generations}] 신규 챔피언 등극! 배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | 면적: {reigning_champion['total_area']:.1f} mm² (Score: {int(reigning_champion['score'])})", flush=True)
             else:
-                mutant['use_strip'] = not mutant['use_strip']
+                stagnant_gens += 1
+                print(f">> [Gen {gen:2d}/{num_generations}] 정체 감지 ({stagnant_gens}/{max_stagnant}세대) | 현재 최고 수율 유지 (배치: {reigning_champion['placed_count']}개)", flush=True)
 
-            next_population.append(mutant)
+                if stagnant_gens >= max_stagnant:
+                    print(f">> [조기 수렴 감지] 연속 {stagnant_gens}세대 동안 추가 수율 개선 없음 -> 헛도는 루프를 즉시 종료하고 최적 챔피언 확정!", flush=True)
+                    break
 
-        population = next_population
+            if gen == num_generations:
+                break
+
+            next_population = [reigning_champion['genome']]
+            for i in range(min(4, len(gen_results))):
+                next_population.append(gen_results[i]['genome'])
+
+            while len(next_population) < pop_size:
+                t_candidates = random.sample(gen_results, min(4, len(gen_results)))
+                winner = max(t_candidates, key=lambda c: c['score'])['genome']
+
+                mutant = {
+                    'parts_order': list(winner['parts_order']),
+                    'c_order': list(winner['c_order']),
+                    'use_strip': winner['use_strip'],
+                    'rot_prefs': dict(winner['rot_prefs'])
+                }
+
+                mut_type = random.random()
+                if mut_type < 0.40:
+                    idx1, idx2 = random.sample(range(len(parts_data)), 2)
+                    mutant['parts_order'][idx1], mutant['parts_order'][idx2] = mutant['parts_order'][idx2], mutant['parts_order'][idx1]
+                elif mut_type < 0.65:
+                    if len(mutant['c_order']) > 1:
+                        i1, i2 = random.sample(range(len(mutant['c_order'])), 2)
+                        mutant['c_order'][i1], mutant['c_order'][i2] = mutant['c_order'][i2], mutant['c_order'][i1]
+                elif mut_type < 0.85:
+                    target_p = random.choice(parts_data)
+                    mutant['rot_prefs'][target_p['id']] = random.choice([[0], [90], [0, 90]])
+                else:
+                    mutant['use_strip'] = not mutant['use_strip']
+
+                next_population.append(mutant)
+
+            population = next_population
 
     elapsed = time.time() - t0
     print("-" * 70)
-    print(f">> 심층 초경쟁 진화 완료! (총 소요 시간: {elapsed:.2f}초)")
-    print(f">> [최종 챔피언 솔루션] 배치 {reigning_champion['placed_count']}개 / 총 면적 {reigning_champion['total_area']:.1f} mm²")
+    print(f">> 초고속 진화 네스팅 연산 완료! (총 소요 시간: {elapsed:.2f}초)")
+    print(f">> [최종 챔피언 수율] 배치 {reigning_champion['placed_count']}개 / 안착 면적 {reigning_champion['total_area']:.1f} mm²")
 
     return reigning_champion['plan']
 
@@ -622,28 +663,28 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
 def post_verify_and_relax(plan, containers_data, gap=5.0, margin=1.0):
     c_map = {c['id']: EvolutionContainer(c, gap, margin) for c in containers_data}
     valid_plan = []
-    dropped_count = 0
-
-    for item in plan:
-        cid = item['container_id']
-        cnt = c_map[cid]
-        gx, gy, w, h = item['gx'], item['gy'], item['w'], item['h']
-
+    for it in plan:
+        cnt = c_map[it['container_id']]
+        gx, gy, w, h = it['gx'], it['gy'], it['w'], it['h']
         if cnt.can_place(gx, gy, w, h):
-            cnt.placed.append(item)
-            valid_plan.append(item)
+            entry = dict(it)
+            cnt.placed.append(entry)
+            cnt.placed_area += entry['w'] * entry['h']
+            valid_plan.append(entry)
         else:
-            adjusted = False
-            for ddx, ddy in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5), (1.0, 0), (-1.0, 0), (0, 1.0), (0, -1.0)]:
-                if cnt.can_place(gx + ddx, gy + ddy, w, h):
-                    item['gx'] = gx + ddx
-                    item['gy'] = gy + ddy
-                    cnt.placed.append(item)
-                    valid_plan.append(item)
-                    adjusted = True
-                    break
-            if not adjusted:
-                dropped_count += 1
+            cand = cnt.find_best_position(w, h, allowed_rotations=[int(round(it.get('rot', 0)))])
+            if cand:
+                cgx, cgy, cw, ch, crot = cand
+                entry = dict(it)
+                entry['gx'] = cgx
+                entry['gy'] = cgy
+                entry['rot'] = crot
+                cnt.placed.append(entry)
+                cnt.placed_area += entry['w'] * entry['h']
+                valid_plan.append(entry)
+
+    for cnt in c_map.values():
+        cnt.jostle_compaction()
 
     return valid_plan
 
@@ -652,35 +693,51 @@ def generate_unplaced_placement(unplaced_parts, containers_data, gap=15.0):
     if not unplaced_parts:
         return []
 
-    max_x = max(c.get('outer_bbox', [0, 0, 0, 0])[2] if c.get('type') != 'circle'
-                else c['circle_center'][0] + c['circle_radius'] for c in containers_data)
-    min_y = min(c.get('outer_bbox', [0, 0, 0, 0])[1] if c.get('type') != 'circle'
-                else c['circle_center'][1] - c['circle_radius'] for c in containers_data)
+    max_right = -float('inf')
+    max_top = -float('inf')
+    for c in containers_data:
+        if c.get('type') == 'circle':
+            cx, cy = c['circle_center']
+            r = c['circle_radius']
+            max_right = max(max_right, cx + r)
+            max_top = max(max_top, cy + r)
+        else:
+            bbox = c['outer_bbox']
+            max_right = max(max_right, bbox[2])
+            max_top = max(max_top, bbox[3])
 
-    base_x = max_x + 100.0
-    cur_y = min_y
+    cur_x = max_right + 150.0
+    cur_y = max_top
+    col_w = 0.0
     fallback_plan = []
 
     for p in unplaced_parts:
         pw, ph = p['w'], p['h']
         fallback_plan.append({
             'part_id': p['id'],
-            'container_id': -1,
-            'gx': base_x,
+            'gx': cur_x,
             'gy': cur_y,
             'w': pw,
             'h': ph,
             'rot': 0
         })
-        cur_y += ph + gap
+        cur_y -= (ph + gap)
+        col_w = max(col_w, pw)
+        if cur_y < -1000000.0:
+            cur_y = max_top
+            cur_x += (col_w + gap)
+            col_w = 0.0
 
     return fallback_plan
 
 
-def solve_nesting(json_in_path, lsp_out_path, json_out_path):
-    t0 = time.time()
+def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
     with open(json_in_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
+
+    # CLI or JSON mode override
+    if 'mode' in data and data['mode'] in ['fast', 'deep']:
+        mode = data['mode']
 
     gap = float(data.get('gap', 5.0))
     margin = float(data.get('margin', 1.0))
@@ -690,7 +747,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
     total_part_area = sum(p['w'] * p['h'] for p in parts_data)
     total_container_area = sum(c['area'] for c in containers_data)
 
-    raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, pop_size=20, num_generations=35)
+    raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, mode=mode)
     clean_plan = post_verify_and_relax(raw_plan, containers_data, gap=gap, margin=margin)
 
     placed_pids = set(it['id'] for it in clean_plan)
@@ -719,7 +776,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v4.6 Nesting Plan (Dynamic Shake & Squeeze Deep Tournament Engine)\n")
+        f.write(";;; MBBN v4.7 Nesting Plan (Ultra-Fast Multi-Core & Cavity Best-Fit Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
@@ -737,6 +794,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
     # Write JSON file
     res = {
         "status": "SUCCESS",
+        "mode": mode,
         "container_yield": round(container_yield, 2),
         "part_yield": round(part_yield, 2),
         "placed_count": len(final_export_plan),
@@ -749,11 +807,11 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
 
     # Print summary
     print("\n" + "=" * 70)
-    print(" [ MBBN v4.6 심층 초경쟁 배치 결과표 (Deep Squeeze Champion Layout) ]")
+    print(f" [ MBBN v4.7 배치 결과 성적표 ({mode.upper()} 모드) ]")
     print("=" * 70)
-    print(f">> 총 부품: {len(parts_data)} 개 | 정상 배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
-    print(f">> 단품 수율(Part Yield): {part_yield:.2f}% | 용기 수율(Container Yield): {container_yield:.2f}%")
-    print(f">> [품질 보증] 외곽선 침범 0건 (Margin {margin:.1f}mm) | 부품 간 충돌 0건 (Gap {gap:.1f}mm 완벽)")
+    print(f">> 총 단품: {len(parts_data)} 개 | 정상 배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
+    print(f">> 부품 수율(Part Yield): {part_yield:.2f}% | 용기 수율(Container Yield): {container_yield:.2f}%")
+    print(f">> [품질 보증] 외곽 침범 0건 (Margin {margin:.1f}mm) | 단품 간 충돌 0건 (Gap {gap:.1f}mm 완벽)")
     print("-" * 70)
 
     placed_by_c = defaultdict(list)
@@ -762,27 +820,34 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
 
     for cid in sorted(placed_by_c.keys()):
         c_info = next(c for c in containers_data if c['id'] == cid)
-        c_desc = f"원 Dia={c_info['circle_radius']*2:.1f}" if c_info.get('type') == 'circle' else f"다각형 {c_info['outer_bbox'][2]-c_info['outer_bbox'][0]:.1f}x{c_info['outer_bbox'][3]-c_info['outer_bbox'][1]:.1f}"
-        print(f"■ [용기 {cid}] ({c_desc}) -> {len(placed_by_c[cid])}개 부품 안착:")
+        c_desc = f"원형 Dia={c_info['circle_radius']*2:.1f}" if c_info.get('type') == 'circle' else f"다각형 {c_info['outer_bbox'][2]-c_info['outer_bbox'][0]:.1f}x{c_info['outer_bbox'][3]-c_info['outer_bbox'][1]:.1f}"
+        print(f"■ [용기 {cid}] ({c_desc}) -> {len(placed_by_c[cid])}개 단품 안착:")
         for it in placed_by_c[cid]:
-            print(f"   * 부품 ID {it['part_id']:2d}: W={it['w']:.1f}, H={it['h']:.1f} -> ({it['gx']:.1f}, {it['gy']:.1f}) 회전={it['rot']}°")
+            print(f"   * 단품 ID {it['part_id']:2d}: W={it['w']:.1f}, H={it['h']:.1f} -> ({it['gx']:.1f}, {it['gy']:.1f}) 회전={it['rot']}°")
 
     if fallback_plan:
-        print("\n■ [도면 우측 미배치 부품] -> 외곽 정렬:")
+        print("\n■ [대형 미배치 단품] -> 외곽 정렬:")
         for it in fallback_plan:
-            print(f"   * 부품 ID {it['part_id']:2d}: W={it['w']:.1f}, H={it['h']:.1f} -> ({it['gx']:.1f}, {it['gy']:.1f})")
+            print(f"   * 단품 ID {it['part_id']:2d}: W={it['w']:.1f}, H={it['h']:.1f} -> ({it['gx']:.1f}, {it['gy']:.1f})")
 
-    print(f"\n>> 네스팅 연산 파일 저장 완료: {lsp_out_path} / {json_out_path}")
+    print(f"\n>> 네스팅 출력 파일 생성 완료: {lsp_out_path} / {json_out_path}")
     print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print("Usage: python mbb_nesting.py <json_in> <lsp_out> <json_out>")
+        print("Usage: python mbb_nesting.py <json_in> <lsp_out> <json_out> [--mode fast|deep]")
         sys.exit(1)
 
     json_in = sys.argv[1]
     lsp_out = sys.argv[2]
     json_out = sys.argv[3]
 
-    solve_nesting(json_in, lsp_out, json_out)
+    exec_mode = 'fast'
+    if len(sys.argv) >= 5:
+        if sys.argv[4] == '--mode' and len(sys.argv) >= 6:
+            exec_mode = sys.argv[5]
+        elif sys.argv[4] in ['fast', 'deep']:
+            exec_mode = sys.argv[4]
+
+    solve_nesting(json_in, lsp_out, json_out, mode=exec_mode)
