@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v4.5 - Global Multi-Nation Allied Nesting Engine
+;;; MBBN v4.6 - Dynamic Shake & Squeeze Deep Tournament Evolutionary Engine
 ;;; ==========================================================================
-;;; PROGRAM    : MBBN Circular & Complex Arc Container Optimization Engine
+;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-23 21:32:00
+;;; LAST MODIFIED: 2026-10-23 21:59:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v4.6 (2026-10-23 21:59:00) : 동적 틈새 공간 개척(Shake & Squeeze) 및 심층 다세대 초경쟁 진화 엔진 탑재
+;;;                                 1. Actcut/Jostle 기반 미배치 단품 주변 부품 연쇄 미세 밀침(Cavity Carving Nudge)
+;;;                                 2. 다중 흔들기 압축(Multi-Pass Jostle Compaction)으로 잉여 공간 통합
+;;;                                 3. 세대당 20개체 x 35세대(총 700회 시뮬레이션) 심층 초경쟁 토너먼트
+;;;                                 4. 원/호 중심축 구심력 중력 및 가변 현(Chord) 대칭 정렬 결합
 ;;; - v4.5 (2026-10-23 21:32:00) : 원형 및 호(Arc) 외곽 컨테이너 글로벌 4국 연합 네스팅 엔진 탑재
-;;;                                 1. 프랑스 Alma/Actcut: 가변 현(Chord) 분할 다단 스트립 패킹 (L(y)=2√(R²-y²))
-;;;                                 2. 미국/영국 Southampton: 원/호 중심축 구심력 중력(Centripetal Gravity) & 대칭 현 정렬
-;;;                                 3. 이스라엘/인도 NestLib: 360° 전방위 IFP 방사선(Radial Ray) 동심원 후보 탐색기
-;;;                                 4. 독일/우크라이나 Stoyan: 개방형 호(Arc) 및 복합 세그먼트 자동 위상 폐합(Polygonize)
 ;;; - v4.3 (2026-10-23 20:55:00) : 다세대 토너먼트 경쟁 진화(Competitive Evolutionary) 엔진 탑재
 ;;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine
 ;;; - v3.0 (2026-10-23 08:25:00) : Legacy Backtracking Engine
@@ -30,7 +31,6 @@ from collections import defaultdict
 try:
     from shapely.geometry import Polygon, box, Point, MultiPoint, LineString
     from shapely.prepared import prep
-    from shapely.ops import linemerge, polygonize
     HAS_SHAPELY = True
 except ImportError:
     HAS_SHAPELY = False
@@ -55,11 +55,10 @@ def is_point_in_poly(x, y, poly):
 
 class EvolutionContainer:
     """
-    Global Multi-Nation Container Solver:
-    - France Alma/Actcut: Adaptive Chord-Strip Packing
-    - US/UK Southampton: Centripetal Gravity & Chord Compaction
-    - Israel/India NestLib: 360° Radial IFP Ray Scanning
-    - Germany/Ukraine Stoyan: Quadratic Distance & Auto-Polygonization
+    Dynamic Shake & Squeeze Container Solver:
+    - Centripetal Sliding Gravity (Symmetric Chord Alignment)
+    - Dynamic Cavity Carving (Squeeze & Nudge 1-2 conflicting parts)
+    - Multi-Pass Jostle Compaction
     """
     def __init__(self, c_info, gap=5.0, margin=1.0):
         self.id = c_info['id']
@@ -104,12 +103,7 @@ class EvolutionContainer:
 
     def is_inside(self, gx, gy, w, h):
         if self.type == 'circle':
-            corners = [
-                (gx, gy),
-                (gx + w, gy),
-                (gx, gy + h),
-                (gx + w, gy + h)
-            ]
+            corners = [(gx, gy), (gx + w, gy), (gx, gy + h), (gx + w, gy + h)]
             for x, y in corners:
                 dx = x - self.cx
                 dy = y - self.cy
@@ -139,14 +133,13 @@ class EvolutionContainer:
 
     def do_float(self, p_entry):
         """
-        Centripetal Sliding Gravity (Southampton / Alma model):
+        Centripetal Sliding Gravity & Symmetry Compaction:
         1. Slide downward in Y toward base tier or adjacent parts.
-        2. Slide horizontally in X toward center of symmetry (cx), keeping chords centered.
+        2. Slide horizontally in X toward center of symmetry cx.
         """
         gx, gy, w, h = p_entry['gx'], p_entry['gy'], p_entry['w'], p_entry['h']
         self.placed.remove(p_entry)
 
-        # 1. Slide downward in Y
         for step in [25.0, 10.0, 2.0, 0.5]:
             while gy - step >= (self.min_oy + self.margin):
                 if self.can_place(gx, gy - step, w, h):
@@ -154,7 +147,6 @@ class EvolutionContainer:
                 else:
                     break
 
-        # 2. Centripetal sliding in X towards cx (Symmetric Chord Alignment)
         part_mid_x = gx + w * 0.5
         for step in [25.0, 10.0, 2.0, 0.5]:
             if part_mid_x > self.cx:
@@ -174,6 +166,14 @@ class EvolutionContainer:
         p_entry['gy'] = gy
         self.placed.append(p_entry)
 
+    def jostle_compaction(self):
+        """Multi-Pass Jostle: Re-compacts all placed parts to consolidate free space."""
+        if len(self.placed) < 2:
+            return
+        for i in range(len(self.placed)):
+            p = self.placed[i]
+            self.do_float(p)
+
     def find_best_position(self, pw, ph, allowed_rotations=[0, 90], prefer_center=False):
         rem_area = self.area - self.placed_area
         if pw * ph > rem_area:
@@ -185,27 +185,22 @@ class EvolutionContainer:
 
         orientations = []
         if 0 in allowed_rotations:
-            orientations.append((pw, ph, 0.0, 0.0, 0.0))
+            orientations.append((pw, ph, 0.0))
         if 90 in allowed_rotations and abs(pw - ph) > 1.0:
-            orientations.append((ph, pw, 90.0, -ph, 0.0))
+            orientations.append((ph, pw, 90.0))
 
         best_cand = None
         best_score = float('inf')
 
-        for cur_w, cur_h, rot, off_x, off_y in orientations:
+        for cur_w, cur_h, rot in orientations:
             if cur_w > (self.max_ox - self.min_ox) or cur_h > (self.max_oy - self.min_oy):
                 continue
 
             cands = []
-
-            # 1. 360° IFP Concentric Rings + Central Symmetry Axis
             if self.type == 'circle':
-                # Center
                 cands.append((self.cx - cur_w * 0.5, self.cy - cur_h * 0.5))
-                # Central Chord Axis (vertical line through cx)
                 for frac_y in [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]:
                     cands.append((self.cx - cur_w * 0.5, self.cy + self.eff_R * frac_y - cur_h * 0.5))
-                # 360° Concentric Rings (15° interval)
                 for frac in [0.2, 0.4, 0.6, 0.75, 0.85]:
                     r_sample = self.eff_R * frac
                     for deg in range(0, 360, 15):
@@ -213,12 +208,10 @@ class EvolutionContainer:
                         cands.append((self.cx - cur_w * 0.5 + r_sample * math.cos(rad),
                                       self.cy - cur_h * 0.5 + r_sample * math.sin(rad)))
             else:
-                # Polygon Centroid Axis
                 cands.append((self.cx - cur_w * 0.5, self.cy - cur_h * 0.5))
                 cands.append((self.min_ox + self.margin, self.min_oy + self.margin))
                 cands.append((self.cx - cur_w * 0.5, self.min_oy + self.margin))
                 cands.append((self.max_ox - self.margin - cur_w, self.min_oy + self.margin))
-                # Internal Grid Scan
                 scan_res = 10
                 step_x = (self.max_ox - self.min_ox - cur_w) / max(1, scan_res)
                 step_y = (self.max_oy - self.min_oy - cur_h) / max(1, scan_res)
@@ -228,22 +221,16 @@ class EvolutionContainer:
                         cx = self.min_ox + self.margin + sx * step_x
                         cands.append((cx, cy))
 
-            # 2. Contact Candidates adjacent to all placed parts
             for p in self.placed:
-                # Horizontal Chord Centered (Top & Bottom)
                 cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
                 cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
-                # Left & Right flush
                 cands.append((p['gx'] + p['w'] + self.gap, p['gy']))
                 cands.append((p['gx'] - cur_w - self.gap, p['gy']))
-                # Above & Below flush
                 cands.append((p['gx'], p['gy'] + p['h'] + self.gap))
                 cands.append((p['gx'], p['gy'] - cur_h - self.gap))
-                # Aligned edges
                 cands.append((p['gx'] + p['w'] - cur_w, p['gy'] + p['h'] + self.gap))
                 cands.append((p['gx'] + p['w'] - cur_w, p['gy'] - cur_h - self.gap))
 
-            # Evaluate all candidates with Symmetric Chord Scoring
             for gx, gy in cands:
                 if self.can_place(gx, gy, cur_w, cur_h):
                     if self.type == 'circle':
@@ -263,13 +250,120 @@ class EvolutionContainer:
 
                     if score < best_score:
                         best_score = score
-                        best_cand = (gx, gy, cur_w, cur_h, rot, off_x, off_y)
+                        best_cand = (gx, gy, cur_w, cur_h, rot)
 
         return best_cand
 
+    def try_squeeze_and_nudge(self, pw, ph, allowed_rotations=[0, 90]):
+        """
+        Actcut / Jostle Dynamic Cavity Carving:
+        Actively nudges 1-2 existing parts to carve an opening for an unplaced part.
+        """
+        rem_area = self.area - self.placed_area
+        if pw * ph > rem_area:
+            return None
+
+        orientations = []
+        if 0 in allowed_rotations:
+            orientations.append((pw, ph, 0.0))
+        if 90 in allowed_rotations and abs(pw - ph) > 1.0:
+            orientations.append((ph, pw, 90.0))
+
+        for cur_w, cur_h, rot in orientations:
+            if cur_w > (self.max_ox - self.min_ox) or cur_h > (self.max_oy - self.min_oy):
+                continue
+            if self.type == 'circle' and (cur_w * cur_w + cur_h * cur_h) > (4.0 * self.eff_R_sq):
+                continue
+
+            test_cands = []
+            if self.type == 'circle':
+                for frac_y in [-0.65, -0.45, -0.25, 0.0, 0.25, 0.45, 0.65]:
+                    test_cands.append((self.cx - cur_w * 0.5, self.cy + self.eff_R * frac_y - cur_h * 0.5))
+                for frac in [0.25, 0.5, 0.75]:
+                    for deg in range(0, 360, 30):
+                        rad = math.radians(deg)
+                        test_cands.append((self.cx - cur_w * 0.5 + self.eff_R * frac * math.cos(rad),
+                                          self.cy - cur_h * 0.5 + self.eff_R * frac * math.sin(rad)))
+            else:
+                step_x = (self.max_ox - self.min_ox - cur_w) / 6.0
+                step_y = (self.max_oy - self.min_oy - cur_h) / 6.0
+                for sy in range(7):
+                    cy = self.min_oy + self.margin + sy * step_y
+                    for sx in range(7):
+                        cx = self.min_ox + self.margin + sx * step_x
+                        test_cands.append((cx, cy))
+
+            for p in self.placed:
+                test_cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
+                test_cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
+                test_cands.append((p['gx'] + p['w'] + self.gap, p['gy']))
+                test_cands.append((p['gx'] - cur_w - self.gap, p['gy']))
+
+            for tx, ty in test_cands:
+                if not self.is_inside(tx, ty, cur_w, cur_h):
+                    continue
+
+                conflicts = []
+                for p in self.placed:
+                    if not (tx + cur_w + self.gap <= p['gx'] + 1e-4 or
+                            tx >= p['gx'] + p['w'] + self.gap - 1e-4 or
+                            ty + cur_h + self.gap <= p['gy'] + 1e-4 or
+                            ty >= p['gy'] + p['h'] + self.gap - 1e-4):
+                        conflicts.append(p)
+
+                if 1 <= len(conflicts) <= 2:
+                    saved_pos = [(p, p['gx'], p['gy']) for p in conflicts]
+                    all_nudged = True
+
+                    for p in conflicts:
+                        orig_x, orig_y = p['gx'], p['gy']
+                        p_nudged = False
+                        nudge_deltas = [
+                            (0, 10.0), (0, -10.0), (10.0, 0), (-10.0, 0),
+                            (0, 20.0), (0, -20.0), (20.0, 0), (-20.0, 0),
+                            (0, 35.0), (0, -35.0), (35.0, 0), (-35.0, 0),
+                            (15.0, 15.0), (-15.0, 15.0), (15.0, -15.0), (-15.0, -15.0)
+                        ]
+                        for ndx, ndy in nudge_deltas:
+                            cand_nx = orig_x + ndx
+                            cand_ny = orig_y + ndy
+                            if not self.is_inside(cand_nx, cand_ny, p['w'], p['h']):
+                                continue
+                            if not (tx + cur_w + self.gap <= cand_nx + 1e-4 or
+                                    tx >= cand_nx + p['w'] + self.gap - 1e-4 or
+                                    ty + cur_h + self.gap <= cand_ny + 1e-4 or
+                                    ty >= cand_ny + p['h'] + self.gap - 1e-4):
+                                continue
+                            other_col = False
+                            for other in self.placed:
+                                if other is not p and other not in conflicts:
+                                    if not (cand_nx + p['w'] + self.gap <= other['gx'] + 1e-4 or
+                                            cand_nx >= other['gx'] + other['w'] + self.gap - 1e-4 or
+                                            cand_ny + p['h'] + self.gap <= other['gy'] + 1e-4 or
+                                            cand_ny >= other['gy'] + other['h'] + self.gap - 1e-4):
+                                        other_col = True
+                                        break
+                            if not other_col:
+                                p['gx'] = cand_nx
+                                p['gy'] = cand_ny
+                                p_nudged = True
+                                break
+
+                        if not p_nudged:
+                            all_nudged = False
+                            break
+
+                    if all_nudged:
+                        return tx, ty, cur_w, cur_h, rot
+                    else:
+                        for p, ox, oy in saved_pos:
+                            p['gx'] = ox
+                            p['gy'] = oy
+
+        return None
+
 
 def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
-    """Evaluates one placement genome and returns its physical layout and fitness score."""
     c_map = {c['id']: EvolutionContainer(c, gap, margin) for c in containers_data}
     c_ids = list(genome['c_order'])
     parts_order = list(genome['parts_order'])
@@ -280,7 +374,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     remaining_ids = set(p['id'] for p in parts_order)
     parts_dict = {p['id']: p for p in parts_order}
 
-    # 1. Multi-Tier Parallel Strip Stacking (Alma/Actcut model)
+    # 1. Multi-Tier Parallel Strip Stacking
     if use_strip:
         clusters = defaultdict(list)
         for p in parts_order:
@@ -329,12 +423,13 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                                 placed_plan.append(e)
                                 if b_pid in remaining_ids:
                                     remaining_ids.remove(b_pid)
+                            cnt.jostle_compaction()
                             stack_placed = True
                             break
                     if stack_placed:
                         break
 
-    # 2. Adaptive Unitary Placement with Centripetal Sliding for remaining parts
+    # 2. Adaptive Unitary Placement with Dynamic Squeeze & Nudge fallback
     remaining_parts = [p for p in parts_order if p['id'] in remaining_ids]
     for p in remaining_parts:
         pw, ph = p['w'], p['h']
@@ -342,11 +437,12 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
         best_cnt, best_pos, best_s = None, None, float('inf')
         prefer_c = (pw * ph > 200000.0)
 
+        # Standard Placement
         for cid in c_ids:
             cnt = c_map[cid]
             pos = cnt.find_best_position(pw, ph, allowed_rotations=allowed_rots, prefer_center=(prefer_c and cnt.type == 'circle'))
             if pos:
-                gx, gy, cur_w, cur_h, rot, ox, oy = pos
+                gx, gy, cur_w, cur_h, rot = pos
                 if cnt.type == 'circle':
                     s = (gy - (cnt.cy - cnt.eff_R)) + 1.4 * abs((gx + cur_w * 0.5) - cnt.cx)
                 else:
@@ -357,7 +453,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                     best_pos = pos
 
         if best_cnt and best_pos:
-            gx, gy, cur_w, cur_h, rot, ox, oy = best_pos
+            gx, gy, cur_w, cur_h, rot = best_pos
             entry = {
                 'id': p['id'],
                 'container_id': best_cnt.id,
@@ -372,6 +468,29 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
             placed_plan.append(entry)
             if p['id'] in remaining_ids:
                 remaining_ids.remove(p['id'])
+        else:
+            # Dynamic Squeeze & Nudge (공간 강제 개척!)
+            for cid in c_ids:
+                cnt = c_map[cid]
+                sq_pos = cnt.try_squeeze_and_nudge(pw, ph, allowed_rotations=allowed_rots)
+                if sq_pos:
+                    gx, gy, cur_w, cur_h, rot = sq_pos
+                    entry = {
+                        'id': p['id'],
+                        'container_id': cnt.id,
+                        'gx': gx, 'gy': gy,
+                        'w': cur_w, 'h': cur_h,
+                        'rot': rot,
+                        'area': cur_w * cur_h
+                    }
+                    cnt.placed.append(entry)
+                    cnt.placed_area += entry['area']
+                    cnt.do_float(entry)
+                    cnt.jostle_compaction()
+                    placed_plan.append(entry)
+                    if p['id'] in remaining_ids:
+                        remaining_ids.remove(p['id'])
+                    break
 
     placed_count = len(placed_plan)
     total_area = sum(it['area'] for it in placed_plan)
@@ -386,18 +505,18 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     }
 
 
-def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0, pop_size=15, num_generations=25):
+def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0, pop_size=20, num_generations=35):
     """
-    Generational Tournament Competitive Evolutionary Nesting Solver.
+    Deep Competitive Evolutionary Nesting Solver (700 Simulations).
     """
     t0 = time.time()
     print("\n" + "=" * 70)
-    print(" [ MBBN v4.5 원형/호 글로벌 연합(Global Allied) 진화 네스팅 엔진 가동 ]")
+    print(" [ MBBN v4.6 동적 틈새 공간 개척(Shake & Squeeze) 심층 초경쟁 진화 엔진 ]")
     print("=" * 70)
-    print(f">> 탐색 규모: 세대당 {pop_size}개체 x {num_generations}세대 토너먼트 경쟁 (총 {pop_size * num_generations}회 시뮬레이션)")
+    print(f">> 탐색 규모: 세대당 {pop_size}개체 x {num_generations}세대 (총 {pop_size * num_generations}회 고강도 시뮬레이션)")
+    print(f">> 알고리즘: 연쇄 미세 밀침(Cavity Nudge) + 다중 흔들기 압축(Jostle) + 대칭 현 정렬")
     print("-" * 70, flush=True)
 
-    # 1. Initial Population Seeding
     population = []
     p_bigness = sorted(parts_data, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 350.0), reverse=True)
     p_area = sorted(parts_data, key=lambda p: (p['w'] * p['h']), reverse=True)
@@ -416,6 +535,7 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
         (p_aspect, c_area_desc, True),
         (p_bigness, c_area_desc, False),
         (p_area, c_circle_first, False),
+        (p_aspect, c_circle_first, True),
     ]
 
     for p_ord, c_ord, strip in seed_configs:
@@ -438,7 +558,6 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
             'rot_prefs': {p['id']: random.choice([[0], [90], [0, 90]]) for p in parts_data}
         })
 
-    # 2. Generational Tournament Evolution Loop
     reigning_champion = None
 
     for gen in range(1, num_generations + 1):
@@ -453,16 +572,16 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
         if reigning_champion is None or gen_best['score'] > reigning_champion['score']:
             reigning_champion = gen_best
             print(f">> [Gen {gen:2d}/{num_generations}] ★ 챔피언 타이틀 갱신! 배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | 면적: {reigning_champion['total_area']:.1f} mm² (Score: {int(reigning_champion['score'])})", flush=True)
+        elif gen % 5 == 0:
+            print(f">> [Gen {gen:2d}/{num_generations}] 초경쟁 순항 중... 현재 챔피언 유지 (배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | {reigning_champion['total_area']:.1f} mm²)", flush=True)
 
         if gen == num_generations:
             break
 
-        # Selection & Elitism
         next_population = [reigning_champion['genome']]
-        for i in range(min(3, len(gen_results))):
+        for i in range(min(4, len(gen_results))):
             next_population.append(gen_results[i]['genome'])
 
-        # Tournament Reproduction & Mutation
         while len(next_population) < pop_size:
             t_candidates = random.sample(gen_results, min(4, len(gen_results)))
             winner = max(t_candidates, key=lambda c: c['score'])['genome']
@@ -476,20 +595,16 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
 
             mut_type = random.random()
             if mut_type < 0.40:
-                # Part swap
                 idx1, idx2 = random.sample(range(len(parts_data)), 2)
                 mutant['parts_order'][idx1], mutant['parts_order'][idx2] = mutant['parts_order'][idx2], mutant['parts_order'][idx1]
             elif mut_type < 0.65:
-                # Container shuffle
                 if len(mutant['c_order']) > 1:
                     i1, i2 = random.sample(range(len(mutant['c_order'])), 2)
                     mutant['c_order'][i1], mutant['c_order'][i2] = mutant['c_order'][i2], mutant['c_order'][i1]
             elif mut_type < 0.85:
-                # Rotation toggle
                 target_p = random.choice(parts_data)
                 mutant['rot_prefs'][target_p['id']] = random.choice([[0], [90], [0, 90]])
             else:
-                # Strip toggle
                 mutant['use_strip'] = not mutant['use_strip']
 
             next_population.append(mutant)
@@ -498,7 +613,7 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
 
     elapsed = time.time() - t0
     print("-" * 70)
-    print(f">> 글로벌 연합 진화 완료! (총 소요 시간: {elapsed:.2f}초)")
+    print(f">> 심층 초경쟁 진화 완료! (총 소요 시간: {elapsed:.2f}초)")
     print(f">> [최종 챔피언 솔루션] 배치 {reigning_champion['placed_count']}개 / 총 면적 {reigning_champion['total_area']:.1f} mm²")
 
     return reigning_champion['plan']
@@ -575,7 +690,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
     total_part_area = sum(p['w'] * p['h'] for p in parts_data)
     total_container_area = sum(c['area'] for c in containers_data)
 
-    raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, pop_size=15, num_generations=25)
+    raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, pop_size=20, num_generations=35)
     clean_plan = post_verify_and_relax(raw_plan, containers_data, gap=gap, margin=margin)
 
     placed_pids = set(it['id'] for it in clean_plan)
@@ -604,7 +719,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v4.5 Nesting Plan (Global Allied Evolution Engine)\n")
+        f.write(";;; MBBN v4.6 Nesting Plan (Dynamic Shake & Squeeze Deep Tournament Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
@@ -634,7 +749,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path):
 
     # Print summary
     print("\n" + "=" * 70)
-    print(" [ MBBN v4.5 글로벌 연합 배치 결과표 (Allied Nesting Champion Layout) ]")
+    print(" [ MBBN v4.6 심층 초경쟁 배치 결과표 (Deep Squeeze Champion Layout) ]")
     print("=" * 70)
     print(f">> 총 부품: {len(parts_data)} 개 | 정상 배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
     print(f">> 단품 수율(Part Yield): {part_yield:.2f}% | 용기 수율(Container Yield): {container_yield:.2f}%")
