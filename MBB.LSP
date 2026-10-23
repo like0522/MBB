@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 10:45:00
+;; LAST MODIFIED: 2026-10-23 10:55:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.3.1 (2026-10-23 10:55:00) : AcDb2dPolyline 3D 좌표 스텝(cdddr) 버그 수정 및 OBB 계산 nil 방탄 가드
 ;; - v3.3 (2026-10-23 10:45:00) : MBBN 단품 경사각(OBB) 자동 정규화 & 무게중심 기준 일체 회전/배치
 ;;                                 (단품 사선 왜곡/외곽선 돌출 0% 방어, 텍스트-도형-구멍 결합 불변 유지, 순수 직교 치수 네스팅)
 ;; - v3.2 (2026-10-23 09:15:00) : MBBN 형상 친화도 기반 전역 수율 극대화 2D 네스팅 & 문자 1:1 정밀 무게중심 바인딩
@@ -1334,52 +1335,49 @@
 
 ;; =============================================================================
 
-(defun MBB:ExtractPoints ( obj resolution / objType pts param end-param inc i p has-bulge b-val ll ur p1 p2 p3 p4 ) 
-
+;; =============================================================================
+;; [START: CURRENT ACTIVE - v3.3.1 MODIFIED (2026-10-23 10:55:00)]
+;; [AcDb2dPolyline 3D 좌표 스텝(cdddr) 및 형상 점 정밀 추출 방어]
+;; =============================================================================
+(defun MBB:ExtractPoints ( obj resolution / objType pts param end-param inc i p has-bulge b-val ll ur p1 p2 p3 p4 step )
     (setq objType (vla-get-objectname obj) pts '())
-
     (cond
-
         ((wcmatch objType "AcDbCircle,AcDbArc,AcDbEllipse,AcDbSpline")
-
             (setq end-param (vlax-curve-getEndParam obj))
-
             (if (and end-param (numberp end-param) (> end-param 1e-6))
-
                 (progn
-
                     (setq inc (/ end-param (float resolution)) i 0.0)
-
                     (if (<= inc 0.0) (setq inc 1.0))
-
-                    (while (<= i end-param) 
-
-                        (setq p (vlax-curve-getPointAtParam obj i)) 
-
-                        (if p (setq pts (cons (list (car p) (cadr p)) pts)))
-
+                    (while (<= i end-param)
+                        (setq p (vlax-curve-getPointAtParam obj i))
+                        (if (and p (listp p) (numberp (car p)) (numberp (cadr p)))
+                            (setq pts (cons (list (car p) (cadr p)) pts))
+                        )
                         (setq i (+ i inc))
-
                     )
-
                 )
-
             )
-
         )
-
         ((wcmatch objType "AcDbPolyline,AcDb2dPolyline")
-            ;; 1. 모든 정점 좌표를 vla-get-Coordinates로 100% 무손실 직접 추출
+            ;; 1. 정점 좌표 vla-get-Coordinates 추출 (AcDbPolyline: 2개씩, AcDb2dPolyline: 3개씩)
+            (setq step (if (eq objType "AcDbPolyline") 2 3))
             (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
-                (progn
-                    (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
-                    (while p2
-                        (setq pts (cons (list (car p2) (cadr p2)) pts))
-                        (setq p2 (cddr p2))
+                (if (and p1 (vlax-variant-value p1))
+                    (progn
+                        (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
+                        (while (and p2 (>= (length p2) 2))
+                            (if (and (numberp (car p2)) (numberp (cadr p2)))
+                                (setq pts (cons (list (car p2) (cadr p2)) pts))
+                            )
+                            (if (= step 2)
+                                (setq p2 (cddr p2))
+                                (setq p2 (cdddr p2))
+                            )
+                        )
                     )
                 )
             )
-            ;; 2. 곡률(Bulge) 구간 안전 보간
+            ;; 2. 폴리선 아크(Bulge) 샘플링
             (setq end-param (vlax-curve-getEndParam obj))
             (if (and end-param (numberp end-param) (> end-param 0.0))
                 (progn
@@ -1395,7 +1393,9 @@
                                     (setq i (+ ll inc))
                                     (while (< i ur)
                                         (if (not (vl-catch-all-error-p (setq p2 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj i)))))
-                                            (if p2 (setq pts (cons (list (car p2) (cadr p2)) pts)))
+                                            (if (and p2 (numberp (car p2)) (numberp (cadr p2)))
+                                                (setq pts (cons (list (car p2) (cadr p2)) pts))
+                                            )
                                         )
                                         (setq i (+ i inc))
                                     )
@@ -1406,46 +1406,49 @@
                     )
                 )
             )
-            ;; 3. BoundingBox 4개 극점을 안전 가드로 추가하여 박스가 모형을 파고들지 않도록 방어
-            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'll 'ur))))
-                (progn
-                    (setq p1 (vlax-safearray->list ll) p3 (vlax-safearray->list ur))
-                    (setq pts (cons (list (car p1) (cadr p1))
-                              (cons (list (car p3) (cadr p1))
-                              (cons (list (car p3) (cadr p3))
-                              (cons (list (car p1) (cadr p3)) pts)))))
+            ;; 3. 점이 전혀 추출되지 않은 경우에만 fallback BBox 적용
+            (if (null pts)
+                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'll 'ur))))
+                    (progn
+                        (setq p1 (vlax-safearray->list ll) p3 (vlax-safearray->list ur))
+                        (if (and p1 p3)
+                            (setq pts (list (list (car p1) (cadr p1))
+                                            (list (car p3) (cadr p1))
+                                            (list (car p3) (cadr p3))
+                                            (list (car p1) (cadr p3))))
+                        )
+                    )
                 )
             )
         )
         ((eq objType "AcDbLine")
-
-             (setq pts (mapcar '(lambda (p) (list (car p) (cadr p))) (list (vlax-curve-getStartPoint obj) (vlax-curve-getEndPoint obj))))
-
-        )
-
-        (t
-
-            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'll 'ur))))
-
-                (progn
-
-                    (setq p1 (vlax-safearray->list ll) p3 (vlax-safearray->list ur) p2 (list (car p3) (cadr p1)) p4 (list (car p1) (cadr p3)))
-
-                    (setq pts (list (list (car p1) (cadr p1)) (list (car p2) (cadr p2)) (list (car p3) (cadr p3)) (list (car p4) (cadr p4))))
-
-                )
-
+            (setq p1 (vlax-curve-getStartPoint obj)
+                  p2 (vlax-curve-getEndPoint obj))
+            (if (and p1 p2)
+                (setq pts (list (list (car p1) (cadr p1)) (list (car p2) (cadr p2))))
             )
-
         )
-
+        (t
+            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'll 'ur))))
+                (progn
+                    (setq p1 (vlax-safearray->list ll) p3 (vlax-safearray->list ur))
+                    (if (and p1 p3)
+                        (setq pts (list (list (car p1) (cadr p1))
+                                        (list (car p3) (cadr p1))
+                                        (list (car p3) (cadr p3))
+                                        (list (car p1) (cadr p3))))
+                    )
+                )
+            )
+        )
     )
-
+    ;; 유효한 2D 숫자 좌표만 엄격 필터링
+    (setq pts (vl-remove-if '(lambda (p) (or (null p) (not (listp p)) (< (length p) 2)
+                                             (null (car p)) (null (cadr p))
+                                             (not (numberp (car p))) (not (numberp (cadr p))))) pts))
     (reverse pts)
-
 )
-
-
+;;; [END: CURRENT ACTIVE - v3.3.1 MODIFIED]
 
 (defun MBB:ConvexHull ( pts / sorted lower upper )
 
@@ -2178,22 +2181,42 @@
 ;;; [START: CURRENT ACTIVE - v3.3 MODIFIED (2026-10-23 10:45:00)]
 ;;; [단품 경사각(OBB) 및 순수 W, H, 중심점 C_orig 정밀 계산 도우미]
 ;;; =========================================================================
-(defun MBB:GetPartOBB ( parent-obj all-objs part-texts / objName is-circle c-cen c-rad pts hull best-ang rot-pts min-x max-x min-y max-y w h c-prime-x c-prime-y cos-a sin-a c-orig-x c-orig-y t-obj t-rot t-deg t-min t-max t-pts t-rot-pts tmp-min tmp-max )
+;;; =========================================================================
+;;; [START: CURRENT ACTIVE - v3.3.1 MODIFIED (2026-10-23 10:55:00)]
+;;; [단품 경사각(OBB) 및 순수 W, H, 중심점 C_orig 정밀 계산 도우미 (완전 방탄 방어)]
+;;; =========================================================================
+(defun MBB:GetPartOBB ( parent-obj all-objs part-texts / objName is-circle c-cen c-rad pts hull best-ang rot-pts min-x max-x min-y max-y w h c-prime-x c-prime-y cos-a sin-a c-orig-x c-orig-y t-obj t-rot t-deg tmp-min tmp-max fallback-w fallback-h )
   (setq objName (vla-get-ObjectName parent-obj)
         is-circle (wcmatch (strcase objName) "*CIRCLE*"))
   (if is-circle
     (progn
-      (setq c-cen (vlax-safearray->list (vlax-variant-value (vla-get-Center parent-obj)))
-            c-rad (vl-catch-all-apply 'vla-get-Radius (list parent-obj)))
-      (if (vl-catch-all-error-p c-rad) (setq c-rad 0.0))
-      (setq w (* 2.0 c-rad)
-            h (* 2.0 c-rad)
-            best-ang 0.0
-            c-orig-x (car c-cen)
-            c-orig-y (cadr c-cen))
+      (setq c-cen nil c-rad nil)
+      (if (not (vl-catch-all-error-p (setq c-cen (vl-catch-all-apply 'vla-get-Center (list parent-obj)))))
+        (setq c-cen (vlax-safearray->list (vlax-variant-value c-cen)))
+      )
+      (if (not (vl-catch-all-error-p (setq c-rad (vl-catch-all-apply 'vla-get-Radius (list parent-obj)))))
+        (if (not (numberp c-rad)) (setq c-rad nil))
+      )
+      (if (and c-cen c-rad (> c-rad 0.0))
+        (setq w (* 2.0 (float c-rad))
+              h (* 2.0 (float c-rad))
+              best-ang 0.0
+              c-orig-x (float (car c-cen))
+              c-orig-y (float (cadr c-cen)))
+        (progn
+          (vla-getboundingbox parent-obj 'tmp-min 'tmp-max)
+          (setq tmp-min (vlax-safearray->list tmp-min)
+                tmp-max (vlax-safearray->list tmp-max)
+                w (max 1.0 (- (car tmp-max) (car tmp-min)))
+                h (max 1.0 (- (cadr tmp-max) (cadr tmp-min)))
+                best-ang 0.0
+                c-orig-x (* 0.5 (+ (car tmp-min) (car tmp-max)))
+                c-orig-y (* 0.5 (+ (cadr tmp-min) (cadr tmp-max))))
+        )
+      )
     )
     (progn
-      ;; 1. 단품 내부 텍스트 회전 각도 확인 (도면 텍스트가 단품과 평행하게 정렬된 경우)
+      ;; 1. 단품 내부 텍스트 회전 각도 확인 (텍스트가 단품과 나란히 기재된 도면)
       (setq best-ang nil)
       (if (and part-texts (> (length part-texts) 0))
         (progn
@@ -2216,78 +2239,79 @@
         )
       )
 
-      ;; 2. 텍스트가 없으면 형상 Convex Hull OBB 최소 외접 직사각형 최적 각도 산출
+      ;; 2. 텍스트가 없으면 형상 Convex Hull OBB 최적 회전각 산출
+      (setq pts (MBB:ExtractPoints parent-obj 100))
       (if (null best-ang)
-        (progn
-          (setq pts (MBB:ExtractPoints parent-obj 100))
-          (if (and pts (>= (length pts) 3))
-            (setq hull (MBB:ConvexHull pts)
-                  best-ang (MBB:FindBestAngle hull))
-            (setq best-ang 0.0)
+        (if (and pts (>= (length pts) 3))
+          (progn
+            (setq hull (MBB:ConvexHull pts))
+            (if (and hull (>= (length hull) 3))
+              (setq best-ang (MBB:FindBestAngle hull))
+              (setq best-ang 0.0)
+            )
           )
+          (setq best-ang 0.0)
         )
       )
 
-      ;; 1도 이내 미세 회전은 0도로 직교 정규화
-      (if (< (abs best-ang) 0.0175)
+      (if (or (null best-ang) (not (numberp best-ang)) (< (abs best-ang) 0.0175))
         (setq best-ang 0.0)
       )
 
-      ;; 3. 단품 형상 점들을 (0,0) 기준 -best-ang 회전하여 최소/최대 BBox 및 회전 중심점 산출
-      (setq pts (MBB:ExtractPoints parent-obj 100))
+      ;; 3. 단품 형상 점들을 (0,0) 기준 -best-ang 회전하여 정밀 W, H 및 회전 중심점 산출
       (if (or (null pts) (< (length pts) 2))
         (progn
           (vla-getboundingbox parent-obj 'tmp-min 'tmp-max)
           (setq tmp-min (vlax-safearray->list tmp-min)
                 tmp-max (vlax-safearray->list tmp-max)
-                pts (list tmp-min (list (car tmp-max) (cadr tmp-min)) tmp-max (list (car tmp-min) (cadr tmp-max))))
+                pts (list (list (car tmp-min) (cadr tmp-min))
+                          (list (car tmp-max) (cadr tmp-min))
+                          (list (car tmp-max) (cadr tmp-max))
+                          (list (car tmp-min) (cadr tmp-max))))
         )
       )
-      (setq rot-pts (MBB:RotatePoints pts (- best-ang))
-            min-x (car (nth 0 rot-pts))
-            max-x min-x
-            min-y (cadr (nth 0 rot-pts))
-            max-y min-y)
-      (foreach p rot-pts
-        (setq min-x (min min-x (car p))
-              max-x (max max-x (car p))
-              min-y (min min-y (cadr p))
-              max-y (max max-y (cadr p)))
-      )
 
-      ;; 텍스트 객체들의 경계도 -best-ang 회전 좌표계에 포괄
-      (if (and part-texts (> (length part-texts) 0))
-        (foreach t-obj part-texts
-          (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list t-obj 't-min 't-max))))
-            (progn
-              (setq t-min (vlax-safearray->list t-min)
-                    t-max (vlax-safearray->list t-max)
-                    t-pts (list t-min (list (car t-max) (cadr t-min)) t-max (list (car t-min) (cadr t-max)))
-                    t-rot-pts (MBB:RotatePoints t-pts (- best-ang)))
-              (foreach p t-rot-pts
-                (setq min-x (min min-x (car p))
-                      max-x (max max-x (car p))
-                      min-y (min min-y (cadr p))
-                      max-y (max max-y (cadr p)))
-              )
+      (setq rot-pts (MBB:RotatePoints pts (- best-ang)))
+      (if (and rot-pts (> (length rot-pts) 0))
+        (progn
+          (setq min-x (car (nth 0 rot-pts))
+                max-x min-x
+                min-y (cadr (nth 0 rot-pts))
+                max-y min-y)
+          (foreach p rot-pts
+            (if (and p (numberp (car p)) (numberp (cadr p)))
+              (setq min-x (min min-x (car p))
+                    max-x (max max-x (car p))
+                    min-y (min min-y (cadr p))
+                    max-y (max max-y (cadr p)))
             )
           )
+          (setq w (max 1.0 (- max-x min-x))
+                h (max 1.0 (- max-y min-y))
+                c-prime-x (* 0.5 (+ min-x max-x))
+                c-prime-y (* 0.5 (+ min-y max-y))
+                cos-a (cos best-ang)
+                sin-a (sin best-ang)
+                c-orig-x (- (* c-prime-x cos-a) (* c-prime-y sin-a))
+                c-orig-y (+ (* c-prime-x sin-a) (* c-prime-y cos-a)))
+        )
+        ;; Fallback (절대 에러 미발생)
+        (progn
+          (vla-getboundingbox parent-obj 'tmp-min 'tmp-max)
+          (setq tmp-min (vlax-safearray->list tmp-min)
+                tmp-max (vlax-safearray->list tmp-max)
+                w (max 1.0 (- (car tmp-max) (car tmp-min)))
+                h (max 1.0 (- (cadr tmp-max) (cadr tmp-min)))
+                best-ang 0.0
+                c-orig-x (* 0.5 (+ (car tmp-min) (car tmp-max)))
+                c-orig-y (* 0.5 (+ (cadr tmp-min) (cadr tmp-max))))
         )
       )
-
-      (setq w (- max-x min-x)
-            h (- max-y min-y)
-            c-prime-x (* 0.5 (+ min-x max-x))
-            c-prime-y (* 0.5 (+ min-y max-y))
-            cos-a (cos best-ang)
-            sin-a (sin best-ang)
-            c-orig-x (- (* c-prime-x cos-a) (* c-prime-y sin-a))
-            c-orig-y (+ (* c-prime-x sin-a) (* c-prime-y cos-a)))
     )
   )
-  (list w h best-ang c-orig-x c-orig-y)
+  (list (float w) (float h) (float best-ang) (float c-orig-x) (float c-orig-y))
 )
-;;; [END: CURRENT ACTIVE - v3.3 MODIFIED]
+;;; [END: CURRENT ACTIVE - v3.3.1 MODIFIED]
 
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   containers-list cid is-circle c-cen c-rad c-area
@@ -2607,7 +2631,7 @@
                 )
               )
 
-              ;; [정밀 OBB 측정 및 단품 리스트 생성]
+              ;; [정밀 OBB 측정 및 단품 리스트 생성 (nil 방어 완비)]
               (setq parts-list '()
                     i 1)
               (foreach pe part-entries
@@ -2616,11 +2640,11 @@
                       part-texts (nth 9 pe)
                       all-objs (cons parent-obj (append children-holes part-texts))
                       obb-res (MBB:GetPartOBB parent-obj all-objs part-texts)
-                      w (nth 0 obb-res)
-                      h (nth 1 obb-res)
-                      base-ang (nth 2 obb-res)
-                      c-orig-x (nth 3 obb-res)
-                      c-orig-y (nth 4 obb-res)
+                      w (if (and obb-res (numberp (nth 0 obb-res))) (float (nth 0 obb-res)) 10.0)
+                      h (if (and obb-res (numberp (nth 1 obb-res))) (float (nth 1 obb-res)) 10.0)
+                      base-ang (if (and obb-res (numberp (nth 2 obb-res))) (float (nth 2 obb-res)) 0.0)
+                      c-orig-x (if (and obb-res (numberp (nth 3 obb-res))) (float (nth 3 obb-res)) 0.0)
+                      c-orig-y (if (and obb-res (numberp (nth 4 obb-res))) (float (nth 4 obb-res)) 0.0)
                       area (* w h))
                 (setq parts-list (cons (list all-objs w h area (length children-holes) (length part-texts) base-ang c-orig-x c-orig-y) parts-list)
                       i (1+ i))
