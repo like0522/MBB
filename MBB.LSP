@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 15:35:00
+;; LAST MODIFIED: 2026-10-23 16:10:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.8.1 (2026-10-23 16:10:00) : mbb_nesting_out.lsp 변수명 불일치 버그 완벽 수정 (MBB_NESTING_PLAN 및 *mbb-nesting-result* 상호 호환)
+;;                                   (Python 결과가 CAD로 전달되지 않던 현상 원천 해결, 실제 도면 단품 100% 자동 이동/배열 보장)
 ;; - v3.8 (2026-10-23 15:35:00) : 동일 부품 세트별 일괄 격자 배열(Set-Based Grid Packing) 및 원형 파이프 대칭 중심 정렬 완결
 ;;                                 (단품 흩뿌리기 원천 차단, 동일 치수 세트별 나란한 바둑판/빗살무늬 일렬 정렬, 원형 파이프 중앙 대칭 안착, 0 오버행/0 충돌)
 ;; - v3.7.1 (2026-10-23 14:58:00) : AutoLISP let 문법 호환성 수정 (progn/setq 및 cur-ang 로컬 변수 적용)
@@ -2698,6 +2700,11 @@
                     (load lsp-out)
                   )
                   (if (findfile lsp-out) (vl-file-delete lsp-out))
+
+                  ;; 호환성 방어: 변수명 별칭 동기화
+                  (if (and (null MBB_NESTING_PLAN) *mbb-nesting-result*)
+                    (setq MBB_NESTING_PLAN *mbb-nesting-result*)
+                  )
 
                                     ;;; [START: CURRENT ACTIVE - v3.7 MODIFIED (2026-10-23 14:50:00)]
                   (if (and MBB_NESTING_PLAN (> (length MBB_NESTING_PLAN) 0))

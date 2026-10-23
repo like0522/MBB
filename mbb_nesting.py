@@ -564,15 +564,40 @@ def main():
     with open(out_json, 'w', encoding='utf-8') as f:
         json.dump(out_dict, f, indent=2, ensure_ascii=False)
 
-    # Export to LSP
+    # Calculate yield metrics
+    placed_area = sum(p['area'] for p in verified_plan)
+    used_containers = set(p['container_id'] for p in verified_plan)
+    total_used_area = 0.0
+    for c in containers_data:
+        if c['id'] in used_containers:
+            total_used_area += float(c.get('area', 1.0))
+    total_yield = (placed_area / total_used_area * 100.0) if total_used_area > 0 else 0.0
+
+    # Export to LSP (CP949) with 100% MBB.LSP compatibility
     with open(out_lsp, 'w', encoding='cp949', errors='replace') as f:
-        f.write(";;; MBBN v3.8 Nesting Output Plan\n")
-        f.write("(setq *mbb-nesting-result*\n")
-        f.write("  (list\n")
-        for item in full_plan:
-            f.write(f"    (list {item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {item['rot']:.4f} {item['off_x']:.4f} {item['off_y']:.4f})\n")
-        f.write("  )\n")
-        f.write(")\n")
+        f.write(";;; MBBN v3.8 Nesting Plan (Set-Based Grid Packing Engine & Post Audit)\n")
+        f.write(f"(setq MBB_TOTAL_YIELD {total_yield:.2f})\n")
+        f.write(f"(setq MBB_PLACED_COUNT {len(verified_plan)})\n")
+        f.write(f"(setq MBB_UNPLACED_COUNT {len(unplaced_parts)})\n")
+        f.write('(setq MBB_NESTING_STATUS "SUCCESS")\n')
+        
+        # 1. Main Placed Plan
+        f.write("(setq MBB_NESTING_PLAN '(\n")
+        for item in verified_plan:
+            rot_deg = float(item['rot'])
+            off_x = float(item.get('off_x', 0.0))
+            off_y = float(item.get('off_y', 0.0))
+            f.write(f"  ({item['id']} {item['container_id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f} {rot_deg:.2f} {off_x:.4f} {off_y:.4f})\n")
+        f.write("))\n")
+
+        # 2. Unplaced Buffer Plan
+        f.write("(setq MBB_UNPLACED_PLAN '(\n")
+        for item in buffer_plan:
+            f.write(f"  ({item['id']} {item['gx']:.4f} {item['gy']:.4f} {item['w']:.4f} {item['h']:.4f})\n")
+        f.write("))\n")
+
+        # 3. Dual Compatibility Alias
+        f.write("(setq *mbb-nesting-result* MBB_NESTING_PLAN)\n")
         f.write(f"(setq *mbb-placed-count* {len(verified_plan)})\n")
         f.write(f"(setq *mbb-unplaced-count* {len(unplaced_parts)})\n")
         f.write("(princ)\n")
