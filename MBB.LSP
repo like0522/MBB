@@ -2,10 +2,11 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 14:50:00
+;; LAST MODIFIED: 2026-10-23 14:58:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.7.1 (2026-10-23 14:58:00) : AutoLISP let 문법 호환성 수정 (progn/setq 및 cur-ang 로컬 변수 적용)
 ;; - v3.7 (2026-10-23 14:50:00) : MBBN 직교 0/90도 고정, 외곽 완전 내접(Margin), 0% 무충돌 및 사후 검토/간격조정(Relaxation) 루프 탑재
 ;;                                 (CAD 좌표/회전 100% 정밀 실측 동기화, 문자 정방향 0/90도 보정, 미배치 단품 우측 버퍼 구역 자동 단정 정렬)
 ;; - v3.6 (2026-10-23 14:20:00) : Deepnest / SVGNest / libnest2d NFP(No-Fit Polygon) 실형상 슬라이딩 네스팅 엔진 완결
@@ -2194,7 +2195,7 @@
                   parts-list best-plan
                   gap margin
                   item geom rot orig-min-x orig-min-y orig-w orig-h
-                  move-dx move-dy rot-deg rot-rad off-x off-y
+                  move-dx move-dy rot-deg rot-rad off-x off-y cur-min-x cur-min-y cur-ang
                   cur-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
                   pi-idx num-pts num-parts id-parts-list pid part-entry
                   ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val )
@@ -2761,14 +2762,15 @@
                             (if part-texts
                               (foreach txt part-texts
                                 (if (vlax-property-available-p txt 'Rotation)
-                                  (let ((ang (vla-get-Rotation txt)))
-                                    (while (< ang 0.0) (setq ang (+ ang (* 2.0 pi))))
-                                    (while (>= ang (* 2.0 pi)) (setq ang (- ang (* 2.0 pi))))
+                                  (progn
+                                    (setq cur-ang (vla-get-Rotation txt))
+                                    (while (< cur-ang 0.0) (setq cur-ang (+ cur-ang (* 2.0 pi))))
+                                    (while (>= cur-ang (* 2.0 pi)) (setq cur-ang (- cur-ang (* 2.0 pi))))
                                     (cond
-                                      ((and (> ang (* 0.6 pi)) (<= ang (* 1.4 pi)))
-                                       (vla-put-Rotation txt (- ang pi)))
-                                      ((and (> ang (* 1.4 pi)) (<= ang (* 1.8 pi)))
-                                       (vla-put-Rotation txt (- ang pi)))
+                                      ((and (> cur-ang (* 0.6 pi)) (<= cur-ang (* 1.4 pi)))
+                                       (vla-put-Rotation txt (- cur-ang pi)))
+                                      ((and (> cur-ang (* 1.4 pi)) (<= cur-ang (* 1.8 pi)))
+                                       (vla-put-Rotation txt (- cur-ang pi)))
                                     )
                                   )
                                 )
