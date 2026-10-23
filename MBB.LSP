@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 09:15:00
+;; LAST MODIFIED: 2026-10-23 10:45:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.3 (2026-10-23 10:45:00) : MBBN 단품 경사각(OBB) 자동 정규화 & 무게중심 기준 일체 회전/배치
+;;                                 (단품 사선 왜곡/외곽선 돌출 0% 방어, 텍스트-도형-구멍 결합 불변 유지, 순수 직교 치수 네스팅)
 ;; - v3.2 (2026-10-23 09:15:00) : MBBN 형상 친화도 기반 전역 수율 극대화 2D 네스팅 & 문자 1:1 정밀 무게중심 바인딩
 ;;                                 (장척물·특대판 100% 전량 배치, 인접 단품의 문자 가로채기 이탈 0% 원천 차단, 20코어 병렬 최적화)
 ;; - v3.1 (2026-10-23 08:48:00) : MBBN Jukka Jylanki MaxRects(BSSF/BAF/BLSF/CP) & Global Multi-Bin Best-Fit 전면 탑재
@@ -2172,6 +2174,121 @@
 ;;; [END: ROLLBACK ANCHOR - v2.7 ORIGINAL]
 
 ;;; [START: CURRENT ACTIVE - v2.8 MODIFIED (2026-10-23 07:03:00)]
+;;; =========================================================================
+;;; [START: CURRENT ACTIVE - v3.3 MODIFIED (2026-10-23 10:45:00)]
+;;; [단품 경사각(OBB) 및 순수 W, H, 중심점 C_orig 정밀 계산 도우미]
+;;; =========================================================================
+(defun MBB:GetPartOBB ( parent-obj all-objs part-texts / objName is-circle c-cen c-rad pts hull best-ang rot-pts min-x max-x min-y max-y w h c-prime-x c-prime-y cos-a sin-a c-orig-x c-orig-y t-obj t-rot t-deg t-min t-max t-pts t-rot-pts tmp-min tmp-max )
+  (setq objName (vla-get-ObjectName parent-obj)
+        is-circle (wcmatch (strcase objName) "*CIRCLE*"))
+  (if is-circle
+    (progn
+      (setq c-cen (vlax-safearray->list (vlax-variant-value (vla-get-Center parent-obj)))
+            c-rad (vl-catch-all-apply 'vla-get-Radius (list parent-obj)))
+      (if (vl-catch-all-error-p c-rad) (setq c-rad 0.0))
+      (setq w (* 2.0 c-rad)
+            h (* 2.0 c-rad)
+            best-ang 0.0
+            c-orig-x (car c-cen)
+            c-orig-y (cadr c-cen))
+    )
+    (progn
+      ;; 1. 단품 내부 텍스트 회전 각도 확인 (도면 텍스트가 단품과 평행하게 정렬된 경우)
+      (setq best-ang nil)
+      (if (and part-texts (> (length part-texts) 0))
+        (progn
+          (setq t-obj (car part-texts)
+                t-rot (vl-catch-all-apply 'vla-get-Rotation (list t-obj)))
+          (if (and (not (vl-catch-all-error-p t-rot)) (numberp t-rot))
+            (progn
+              (setq t-deg (* (/ t-rot pi) 180.0))
+              (while (>= t-deg 180.0) (setq t-deg (- t-deg 180.0)))
+              (while (< t-deg 0.0) (setq t-deg (+ t-deg 180.0)))
+              (if (and (>= t-deg 45.0) (<= t-deg 135.0))
+                (setq best-ang (* (/ (- t-deg 90.0) 180.0) pi))
+                (progn
+                  (if (> t-deg 135.0) (setq t-deg (- t-deg 180.0)))
+                  (setq best-ang (* (/ t-deg 180.0) pi))
+                )
+              )
+            )
+          )
+        )
+      )
+
+      ;; 2. 텍스트가 없으면 형상 Convex Hull OBB 최소 외접 직사각형 최적 각도 산출
+      (if (null best-ang)
+        (progn
+          (setq pts (MBB:ExtractPoints parent-obj 100))
+          (if (and pts (>= (length pts) 3))
+            (setq hull (MBB:ConvexHull pts)
+                  best-ang (MBB:FindBestAngle hull))
+            (setq best-ang 0.0)
+          )
+        )
+      )
+
+      ;; 1도 이내 미세 회전은 0도로 직교 정규화
+      (if (< (abs best-ang) 0.0175)
+        (setq best-ang 0.0)
+      )
+
+      ;; 3. 단품 형상 점들을 (0,0) 기준 -best-ang 회전하여 최소/최대 BBox 및 회전 중심점 산출
+      (setq pts (MBB:ExtractPoints parent-obj 100))
+      (if (or (null pts) (< (length pts) 2))
+        (progn
+          (vla-getboundingbox parent-obj 'tmp-min 'tmp-max)
+          (setq tmp-min (vlax-safearray->list tmp-min)
+                tmp-max (vlax-safearray->list tmp-max)
+                pts (list tmp-min (list (car tmp-max) (cadr tmp-min)) tmp-max (list (car tmp-min) (cadr tmp-max))))
+        )
+      )
+      (setq rot-pts (MBB:RotatePoints pts (- best-ang))
+            min-x (car (nth 0 rot-pts))
+            max-x min-x
+            min-y (cadr (nth 0 rot-pts))
+            max-y min-y)
+      (foreach p rot-pts
+        (setq min-x (min min-x (car p))
+              max-x (max max-x (car p))
+              min-y (min min-y (cadr p))
+              max-y (max max-y (cadr p)))
+      )
+
+      ;; 텍스트 객체들의 경계도 -best-ang 회전 좌표계에 포괄
+      (if (and part-texts (> (length part-texts) 0))
+        (foreach t-obj part-texts
+          (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list t-obj 't-min 't-max))))
+            (progn
+              (setq t-min (vlax-safearray->list t-min)
+                    t-max (vlax-safearray->list t-max)
+                    t-pts (list t-min (list (car t-max) (cadr t-min)) t-max (list (car t-min) (cadr t-max)))
+                    t-rot-pts (MBB:RotatePoints t-pts (- best-ang)))
+              (foreach p t-rot-pts
+                (setq min-x (min min-x (car p))
+                      max-x (max max-x (car p))
+                      min-y (min min-y (cadr p))
+                      max-y (max max-y (cadr p)))
+              )
+            )
+          )
+        )
+      )
+
+      (setq w (- max-x min-x)
+            h (- max-y min-y)
+            c-prime-x (* 0.5 (+ min-x max-x))
+            c-prime-y (* 0.5 (+ min-y max-y))
+            cos-a (cos best-ang)
+            sin-a (sin best-ang)
+            c-orig-x (- (* c-prime-x cos-a) (* c-prime-y sin-a))
+            c-orig-y (+ (* c-prime-x sin-a) (* c-prime-y cos-a)))
+    )
+  )
+  (list w h best-ang c-orig-x c-orig-y)
+)
+;;; [END: CURRENT ACTIVE - v3.3 MODIFIED]
+
 (defun c:MBBN ( / *error* ss-out ss-in acDoc mspace i ename obj objName
                   containers-list cid is-circle c-cen c-rad c-area
                   out-min out-max out-pts p1 p2 num-v vi total-len step-dist cur-dist
@@ -2184,7 +2301,8 @@
                   move-dx move-dy
                   cur-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
                   pi-idx num-pts num-parts id-parts-list pid part-entry
-                  ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val )
+                  ci-idx num-c cid-val is-c-val c-cen-val c-rad-val c-min-val c-max-val c-pts-val c-area-val
+                  obb-res base-ang c-orig-x c-orig-y tgt-cen-x tgt-cen-y delta-theta tgt-w tgt-h )
   (vl-load-com)
   (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
   (setq mspace (vla-get-ModelSpace acDoc))
@@ -2205,7 +2323,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.2] 형상 친화도 기반 전역 수율 극대화 2D 네스팅")
+  (princ "\n[MBBN v3.3] 형상 친화도 기반 전역 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2415,8 +2533,9 @@
               )
               (setq clustered-parts (reverse clustered-parts))
 
-;;; [START: CURRENT ACTIVE - v3.2 MODIFIED (2026-10-23 09:15:00)]
-              ;; [텍스트 1:1 정밀 무게중심 최단거리 배타적 바인딩]: 엉뚱한 단품의 문자 가로채기 100% 원천 차단
+;;; [START: ROLLBACK ANCHOR - v3.2]
+;;; [START: CURRENT ACTIVE - v3.3 MODIFIED (2026-10-23 10:45:00)]
+              ;; [텍스트 1:1 결합 & 단품 경사각(OBB) 정규화]: 사선 왜곡 및 외곽선 돌출 100% 방어
               (setq part-entries '()
                     pi 0)
               (foreach grp clustered-parts
@@ -2433,7 +2552,7 @@
               )
               (setq part-entries (reverse part-entries))
 
-              ;; 각 문자를 가장 적합한 유일한 단품에 1:1 귀속
+              ;; 각 문자를 가장 가까운 단품에 1:1 귀속
               (foreach t-item text-list
                 (setq t-obj (nth 0 t-item)
                       t-min (nth 1 t-item)
@@ -2443,7 +2562,7 @@
                       best-pi nil
                       min-dist 1.0e15)
 
-                ;; 1단계: BBOX 내부 포함 단품 우선 검사
+                ;; 1단계: BBOX 내부 포함 단품 우선 검색
                 (foreach pe part-entries
                   (setq p-min (nth 3 pe)
                         p-max (nth 4 pe))
@@ -2455,7 +2574,7 @@
                   )
                 )
 
-                ;; 2단계: BBOX 외부에 걸쳐있는 경우 중심점 최단거리 단품 선택
+                ;; 2단계: BBOX 외부에 있는 경우 중심 최단거리 단품 매칭
                 (if (null best-pi)
                   (foreach pe part-entries
                     (setq p-mid-x (nth 5 pe)
@@ -2470,7 +2589,7 @@
                   )
                 )
 
-                ;; 선택된 단품에 텍스트 등록
+                ;; 매칭된 단품에 텍스트 등록
                 (if best-pi
                   (setq part-entries
                         (mapcar
@@ -2488,42 +2607,42 @@
                 )
               )
 
-              ;; 최종 parts-list 구축
+              ;; [정밀 OBB 측정 및 단품 리스트 생성]
               (setq parts-list '()
                     i 1)
               (foreach pe part-entries
                 (setq parent-obj (nth 1 pe)
                       children-holes (nth 2 pe)
-                      tmp-min (nth 3 pe)
-                      tmp-max (nth 4 pe)
-                      w (nth 7 pe)
-                      h (nth 8 pe)
                       part-texts (nth 9 pe)
                       all-objs (cons parent-obj (append children-holes part-texts))
+                      obb-res (MBB:GetPartOBB parent-obj all-objs part-texts)
+                      w (nth 0 obb-res)
+                      h (nth 1 obb-res)
+                      base-ang (nth 2 obb-res)
+                      c-orig-x (nth 3 obb-res)
+                      c-orig-y (nth 4 obb-res)
                       area (* w h))
-                (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list)
+                (setq parts-list (cons (list all-objs w h area (length children-holes) (length part-texts) base-ang c-orig-x c-orig-y) parts-list)
                       i (1+ i))
               )
               (setq parts-list (reverse parts-list))
-;;; [END: CURRENT ACTIVE - v3.2 MODIFIED]
 
               (if parts-list
                 (progn
-;;; [START: CURRENT ACTIVE - v3.0 MODIFIED (2026-10-23 08:25:00)]
-                  ;; 대형 단품(길이 + 면적 복합 Bigness) 최우선 정렬
+                  ;; 대형 단품(면적 + 최대 치수 Bigness) 최우선 정렬
                   (setq parts-list (vl-sort parts-list 
                                      '(lambda (a b) 
-                                        (> (+ (nth 5 a) (* (max (nth 3 a) (nth 4 a)) 500.0))
-                                           (+ (nth 5 b) (* (max (nth 3 b) (nth 4 b)) 500.0))))))
+                                        (> (+ (nth 3 a) (* (max (nth 1 a) (nth 2 a)) 500.0))
+                                           (+ (nth 3 b) (* (max (nth 1 b) (nth 2 b)) 500.0))))))
                   
                   (setq i 1)
                   (foreach p parts-list
-                    (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos (nth 3 p) 2 1) 
-                                   " mm, 높이 = " (rtos (nth 4 p) 2 1) 
-                                   " mm (Bigness 크기순 우선 정렬, 홀 " (itoa (nth 6 p)) "개, 글자 " (itoa (nth 7 p)) "개 묶음)"))
+                    (princ (strcat "\n   - [단품 " (itoa i) "] 폭 = " (rtos (nth 1 p) 2 1) 
+                                   " mm, 높이 = " (rtos (nth 2 p) 2 1) 
+                                   " mm (Bigness 우선 정렬, 구멍 " (itoa (nth 4 p)) "개, 문자 " (itoa (nth 5 p)) "개 결합, 기준각: " (rtos (* (/ (nth 6 p) pi) 180.0) 2 1) "°)"))
                     (setq i (1+ i))
                   )
-;;; [END: CURRENT ACTIVE - v3.0 MODIFIED]
+;;; [END: CURRENT ACTIVE - v3.3 MODIFIED]
 
                   ;; (margin & gap 설정값 유지)
 
@@ -2601,7 +2720,7 @@
                       )
                       (write-line "  ]," f)
 
-                      ;; parts 배열 출력
+                      ;; parts 배열 출력 (순수 직교 W, H, Area 전송)
                       (write-line "  \"parts\": [" f)
                       (setq pi-idx 0 num-parts (length id-parts-list))
                       (foreach item id-parts-list
@@ -2609,11 +2728,9 @@
                               pid (car item)
                               p   (cdr item))
                         (write-line (strcat "    {\"id\": " (itoa pid)
-                                            ", \"orig_min_x\": " (rtos (nth 1 p) 2 4)
-                                            ", \"orig_min_y\": " (rtos (nth 2 p) 2 4)
-                                            ", \"w\": " (rtos (nth 3 p) 2 4)
-                                            ", \"h\": " (rtos (nth 4 p) 2 4)
-                                            ", \"area\": " (rtos (nth 5 p) 2 4)
+                                            ", \"w\": " (rtos (nth 1 p) 2 4)
+                                            ", \"h\": " (rtos (nth 2 p) 2 4)
+                                            ", \"area\": " (rtos (nth 3 p) 2 4)
                                             "}"
                                             (if (< pi-idx num-parts) "," "")) f)
                       )
@@ -2679,21 +2796,36 @@
                           (progn
                             (setq p (cdr part-entry)
                                   all-objs (nth 0 p)
-                                  orig-min-x (nth 1 p)
-                                  orig-min-y (nth 2 p)
-                                  orig-w (nth 3 p)
-                                  orig-h (nth 4 p))
+                                  orig-w   (nth 1 p)
+                                  orig-h   (nth 2 p)
+                                  base-ang (nth 6 p)
+                                  c-orig-x (nth 7 p)
+                                  c-orig-y (nth 8 p))
+
+                            ;; 1. 회전각 계산: 원본 기울기(-base-ang) 상쇄 후 배치 회전각(rot) 적용
                             (if (= rot 90)
-                              (progn
-                                (foreach o all-objs
-                                  (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list orig-min-x orig-min-y 0.0)) (/ pi 2.0)))
-                                )
-                                (setq move-dx (+ (- gx orig-min-x) orig-h)
-                                      move-dy (- gy orig-min-y))
-                              )
-                              (setq move-dx (- gx orig-min-x)
-                                    move-dy (- gy orig-min-y))
+                              (setq delta-theta (+ (- base-ang) (/ pi 2.0))
+                                    tgt-w h
+                                    tgt-h w)
+                              (setq delta-theta (- base-ang)
+                                    tgt-w w
+                                    tgt-h h)
                             )
+
+                            ;; 2. 목표 중심점 및 평행이동 벡터 계산
+                            (setq tgt-cen-x (+ gx (* 0.5 tgt-w))
+                                  tgt-cen-y (+ gy (* 0.5 tgt-h))
+                                  move-dx   (- tgt-cen-x c-orig-x)
+                                  move-dy   (- tgt-cen-y c-orig-y))
+
+                            ;; 3. 단품의 모든 객체(형상+구멍+텍스트) 중심점 기준 일체 회전
+                            (if (> (abs delta-theta) 1.0e-5)
+                              (foreach o all-objs
+                                (vl-catch-all-apply 'vla-Rotate (list o (vlax-3d-point (list c-orig-x c-orig-y 0.0)) delta-theta))
+                              )
+                            )
+
+                            ;; 4. 목표 위치로 일체 평행이동
                             (foreach o all-objs
                               (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
                             )
