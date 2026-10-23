@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 19:53:00
+;; LAST MODIFIED: 2026-10-23 20:25:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.2 (2026-10-23 20:25:00) : Actcut 100-Pass Multi-Strategy Engine 탑재
+;;                                 (순수 격자 편중 탈피, 1차~100차 다차원 시뮬레이션, 최고 수율 챔피언 자동 선별, 100% 무간섭/무침범)
 ;; - v4.1 (2026-10-23 19:53:00) : Actcut 코어 역공학(rea 도구) 기반 네스팅 및 Lattice Grid 배열 엔진 전면 탑재
 ;;                                 (Knapsack Bigness 우선순위, 동일 부품 격자 배열 OpalineFavorAlreadyNestedParts,
 ;;                                  doFloat 좌하단 중력 밀착 최적화, doShake 미세 틈새 탐색, 100% 무간섭/무침범)
@@ -2204,7 +2206,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v4.1] Actcut 역공학 네스팅 및 Lattice 격자 배열 엔진 가동...")
+  (princ "\n[MBBN v4.2] Actcut 100-Pass 다차원 최고 수율 시뮬레이션 역공학 네스팅 및 Lattice 격자 배열 엔진 가동...")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
