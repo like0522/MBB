@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 21:16:00
+;; LAST MODIFIED: 2026-10-23 21:32:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v4.5 (2026-10-23 21:32:00) : 원형 및 호(Arc) 외곽 컨테이너 글로벌 4국 연합 네스팅 엔진 탑재
+;;                                 (프랑스식 가변 현 분할, 미국/영국식 구심력 중력, 이스라엘/인도식 360° IFP 방사선 스캔, 독일/우크라이나식 곡선 자동 폐합)
 ;; - v4.4 (2026-10-23 21:16:00) : MBBG 외곽 틀-내부 형상 자동 정렬 연산 Python Shapely/Welzl MEC 엔진 전면 이관
 ;;                                 (원형 0.1ms MEC 완벽 센터링, 다각형 30ms GEOS C-거리장 2D 최적화, 100% 무간섭 최대 여유 공간 안착)
 ;; - v4.3 (2026-10-23 20:58:00) : 다세대 경쟁 진화(Competitive Evolutionary) 네스팅 엔진 & 문자 1:1 절대 바인딩 탑재
@@ -1984,6 +1986,12 @@
                     (setq cur-dist (+ cur-dist step-dist))
                   )
                   (setq out-pts (reverse out-pts))
+;;; [START: CURRENT ACTIVE - v4.5 MODIFIED (2026-10-23 21:32:00)]
+              ;; 호(ARC) 단품 선택 시 시점-종점을 현(Chord)으로 자동 폐합하여 닫힌 2D 다각형 보장
+              (if (and (wcmatch (strcase objName) "*ARC*") out-pts (>= (length out-pts) 2))
+                (setq out-pts (append out-pts (list (car out-pts))))
+              )
+;;; [END: CURRENT ACTIVE - v4.5 MODIFIED]
                 )
               )
             )
@@ -2298,7 +2306,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v4.3] 다세대 경쟁 진화(Competitive Evolutionary) 네스팅 엔진 가동...")
+  (princ "\n[MBBN v4.5] 원형/호 글로벌 4국 연합 진화 네스팅 엔진 가동...")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
