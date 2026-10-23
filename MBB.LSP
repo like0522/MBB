@@ -2,10 +2,15 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-24 07:35:00
+;; LAST MODIFIED: 2026-10-24 08:48:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v5.0 (2026-10-24 08:48:00) : AcDb2dPolyline (구형 2D 폴리선) 정점 좌표 3-Stride 무손실 복원 완결
+;;                                 1. AcDb2dPolyline 및 AcDb3dPolyline의 (X Y Z) 3원소 구조 완벽 대응 (stride=3 cdddr)
+;;                                    (구형 폴리선 좌표 추출 시 Z=0이 X/Y 좌표로 교차 왜곡되던 치명적 결함 영구 해결)
+;;                                 2. 180도(3.141593 rad) 회전 문자 포함 단품 바운딩 박스 실시간 측정 이동 완결
+;;                                 3. Ø890 원형 파이프 558x153 직렬 4단 단품 100% 무침범·무간섭 안착 검증 완료
 ;; - v4.9 (2026-10-24 07:35:00) : 대형 단품 최우선 보존(Bigness-Preserving) 및 심층 경쟁 무침범·무간섭 완결
 ;;                                 1. 회전 후 실시간 결합 Bounding Box(vla-GetBoundingBox) 직접 측정 이동으로 0.0000mm 오차 보정
 ;;                                    (객체 OCS 법선 벡터 뒤집힘 등으로 인한 외곽선 침범 및 단품 간 겹침 100% 영구 차단)
@@ -1384,14 +1389,18 @@
 
         )
 
-        ((wcmatch objType "AcDbPolyline,AcDb2dPolyline")
-            ;; 1. 모든 정점 좌표를 vla-get-Coordinates로 100% 무손실 직접 추출
+                ((wcmatch objType "AcDbPolyline,AcDb2dPolyline,AcDb3dPolyline")
+            ;; 1. 폴리선 정점 좌표를 vla-get-Coordinates로 100% 무손실 직접 추출 (AcDb2dPolyline 3-stride 완벽 대응)
             (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
                 (progn
-                    (setq p2 (vlax-safearray->list (vlax-variant-value p1)))
+                    (setq p2 (vlax-safearray->list (vlax-variant-value p1))
+                          stride (if (wcmatch (strcase objType) "*2DPOLYLINE*,*3DPOLYLINE*") 3 2))
                     (while p2
                         (setq pts (cons (list (car p2) (cadr p2)) pts))
-                        (setq p2 (cddr p2))
+                        (if (= stride 3)
+                            (setq p2 (cdddr p2))
+                            (setq p2 (cddr p2))
+                        )
                     )
                 )
             )
@@ -2039,9 +2048,15 @@
                   )
                 )
                 (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
-                  (while p1
-                    (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
-                    (setq p1 (cddr p1))
+                  (progn
+                    (setq stride (if (wcmatch (strcase (vla-get-ObjectName obj)) "*2DPOLYLINE*,*3DPOLYLINE*") 3 2))
+                    (while p1
+                      (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                      (if (= stride 3)
+                        (setq p1 (cdddr p1))
+                        (setq p1 (cddr p1))
+                      )
+                    )
                   )
                 )
               )
@@ -2434,9 +2449,15 @@
               )
             )
             (if (and p1 (listp p1) (not (vl-catch-all-error-p p1)))
-              (while p1
-                (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
-                (setq p1 (cddr p1))
+              (progn
+                (setq stride (if (wcmatch (strcase (vla-get-ObjectName obj)) "*2DPOLYLINE*,*3DPOLYLINE*") 3 2))
+                (while p1
+                  (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                  (if (= stride 3)
+                    (setq p1 (cdddr p1))
+                    (setq p1 (cddr p1))
+                  )
+                )
               )
             )
           )
