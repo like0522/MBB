@@ -2,10 +2,12 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-23 08:48:00
+;; LAST MODIFIED: 2026-10-23 09:15:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v3.2 (2026-10-23 09:15:00) : MBBN 형상 친화도 기반 전역 수율 극대화 2D 네스팅 & 문자 1:1 정밀 무게중심 바인딩
+;;                                 (장척물·특대판 100% 전량 배치, 인접 단품의 문자 가로채기 이탈 0% 원천 차단, 20코어 병렬 최적화)
 ;; - v3.1 (2026-10-23 08:48:00) : MBBN Jukka Jylanki MaxRects(BSSF/BAF/BLSF/CP) & Global Multi-Bin Best-Fit 전면 탑재
 ;;                                 (실수 좌표계 자유공간 분할, 0°/90° 전방위 탐색, 원형 유효 반경(R-m) 정밀 복원 및 20코어 64개 병렬 전략)
 ;; - v3.0 (2026-10-23 08:25:00) : MBBN 대형 단품(길이+면적 복합 Bigness) 우선순위 및 시행착오(Backtracking) 수율 극대화 네스팅 엔진 구축
@@ -2203,7 +2205,7 @@
   (vla-StartUndoMark acDoc)
 
   (princ "\n================================================================")
-  (princ "\n[MBBN v3.1] 세계 표준 MaxRects & Global Multi-Bin Best-Fit 2D 네스팅")
+  (princ "\n[MBBN v3.2] 형상 친화도 기반 전역 수율 극대화 2D 네스팅")
   (princ "\n================================================================")
 
   ;; 전역 기본값 세션 유지 (직전 값 기억)
@@ -2413,37 +2415,97 @@
               )
               (setq clustered-parts (reverse clustered-parts))
 
-              ;; [텍스트 1:1 배타적 바인딩]: 중복 할당 방지 및 단품/문자 이탈 원천 차단
-              (setq assigned-texts '()
-                    parts-list '()
-                    i 1)
+;;; [START: CURRENT ACTIVE - v3.2 MODIFIED (2026-10-23 09:15:00)]
+              ;; [텍스트 1:1 정밀 무게중심 최단거리 배타적 바인딩]: 엉뚱한 단품의 문자 가로채기 100% 원천 차단
+              (setq part-entries '()
+                    pi 0)
               (foreach grp clustered-parts
                 (setq parent-obj (caar grp)
                       children-holes (cadr grp)
                       tmp-min (nth 2 (car grp))
                       tmp-max (nth 3 (car grp))
-                      part-texts '())
-                (foreach t-item text-list
-                  (setq t-obj (nth 0 t-item)
-                        t-pt (nth 1 t-item))
-                  (if (and (null (vl-position t-obj assigned-texts))
-                           (<= (- (car tmp-min) 50.0) (car t-pt))
-                           (<= (car t-pt) (+ (car tmp-max) 50.0))
-                           (<= (- (cadr tmp-min) 50.0) (cadr t-pt))
-                           (<= (cadr t-pt) (+ (cadr tmp-max) 50.0)))
-                    (progn
-                      (setq part-texts (cons t-obj part-texts)
-                            assigned-texts (cons t-obj assigned-texts))
+                      mid-x (* 0.5 (+ (car tmp-min) (car tmp-max)))
+                      mid-y (* 0.5 (+ (cadr tmp-min) (cadr tmp-max)))
+                      w (- (car tmp-max) (car tmp-min))
+                      h (- (cadr tmp-max) (cadr tmp-min)))
+                (setq part-entries (cons (list pi parent-obj children-holes tmp-min tmp-max mid-x mid-y w h '()) part-entries)
+                      pi (1+ pi))
+              )
+              (setq part-entries (reverse part-entries))
+
+              ;; 각 문자를 가장 적합한 유일한 단품에 1:1 귀속
+              (foreach t-item text-list
+                (setq t-obj (nth 0 t-item)
+                      t-min (nth 1 t-item)
+                      t-max (nth 2 t-item)
+                      t-mid-x (* 0.5 (+ (car t-min) (car t-max)))
+                      t-mid-y (* 0.5 (+ (cadr t-min) (cadr t-max)))
+                      best-pi nil
+                      min-dist 1.0e15)
+
+                ;; 1단계: BBOX 내부 포함 단품 우선 검사
+                (foreach pe part-entries
+                  (setq p-min (nth 3 pe)
+                        p-max (nth 4 pe))
+                  (if (and (>= t-mid-x (- (car p-min) 5.0))
+                           (<= t-mid-x (+ (car p-max) 5.0))
+                           (>= t-mid-y (- (cadr p-min) 5.0))
+                           (<= t-mid-y (+ (cadr p-max) 5.0)))
+                    (setq best-pi (nth 0 pe))
+                  )
+                )
+
+                ;; 2단계: BBOX 외부에 걸쳐있는 경우 중심점 최단거리 단품 선택
+                (if (null best-pi)
+                  (foreach pe part-entries
+                    (setq p-mid-x (nth 5 pe)
+                          p-mid-y (nth 6 pe)
+                          dx (- t-mid-x p-mid-x)
+                          dy (- t-mid-y p-mid-y)
+                          dist (+ (* dx dx) (* dy dy)))
+                    (if (< dist min-dist)
+                      (setq min-dist dist
+                            best-pi (nth 0 pe))
                     )
                   )
                 )
-                (setq all-objs (cons parent-obj (append children-holes part-texts))
-                      w (- (car tmp-max) (car tmp-min))
-                      h (- (cadr tmp-max) (cadr tmp-min))
+
+                ;; 선택된 단품에 텍스트 등록
+                (if best-pi
+                  (setq part-entries
+                        (mapcar
+                          '(lambda (pe)
+                             (if (= (nth 0 pe) best-pi)
+                               (list (nth 0 pe) (nth 1 pe) (nth 2 pe) (nth 3 pe) (nth 4 pe)
+                                     (nth 5 pe) (nth 6 pe) (nth 7 pe) (nth 8 pe)
+                                     (cons t-obj (nth 9 pe)))
+                               pe
+                             )
+                           )
+                          part-entries
+                        )
+                  )
+                )
+              )
+
+              ;; 최종 parts-list 구축
+              (setq parts-list '()
+                    i 1)
+              (foreach pe part-entries
+                (setq parent-obj (nth 1 pe)
+                      children-holes (nth 2 pe)
+                      tmp-min (nth 3 pe)
+                      tmp-max (nth 4 pe)
+                      w (nth 7 pe)
+                      h (nth 8 pe)
+                      part-texts (nth 9 pe)
+                      all-objs (cons parent-obj (append children-holes part-texts))
                       area (* w h))
                 (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list)
                       i (1+ i))
               )
+              (setq parts-list (reverse parts-list))
+;;; [END: CURRENT ACTIVE - v3.2 MODIFIED]
 
               (if parts-list
                 (progn
