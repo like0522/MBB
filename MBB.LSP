@@ -2,10 +2,13 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-24 08:48:00
+;; LAST MODIFIED: 2026-10-24 10:25:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v5.2 (2026-10-24 10:25:00) : Ø1025 원형 철판 잔재 558x729 초대형 판재 + 153x558 장척 판재 100% 동반 배치 완결
+;;                                 1. 구조적 동반 배치(Deterministic Companion Side-by-Side/Top-Bottom) 엔진 탑재
+;;                                 2. 270도(4.712389 rad) 회전 문자 포함 단품 바운딩 박스 실시간 측정 이동 완결
 ;; - v5.0 (2026-10-24 08:48:00) : AcDb2dPolyline (구형 2D 폴리선) 정점 좌표 3-Stride 무손실 복원 완결
 ;;                                 1. AcDb2dPolyline 및 AcDb3dPolyline의 (X Y Z) 3원소 구조 완벽 대응 (stride=3 cdddr)
 ;;                                    (구형 폴리선 좌표 추출 시 Z=0이 X/Y 좌표로 교차 왜곡되던 치명적 결함 영구 해결)

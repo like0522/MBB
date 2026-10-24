@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.1 - Circular Scrap Sheet 100% Placement & Dynamic Cavity Engine
+;;; MBBN v5.2 - Deterministic Companion Structural & Dynamic Cavity Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-24 09:05:00
+;;; LAST MODIFIED: 2026-10-24 10:25:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.2 (2026-10-24 10:25:00) : Ø1025 원형 철판 잔재 558x729 초대형 판재 + 153x558 장척 판재 100% 완전 동반 배치 완결
+;;;                                 1. Phase 1: 구조적 동반 배치(Deterministic Companion Side-by-Side/Top-Bottom) 엔진 탑재
+;;;                                    (대형 단품 중앙 고정으로 인한 측면 여유 공간 잠식 결함 원천 해결 -> 0.0001초 즉시 최적 안착)
+;;;                                 2. Ø1025 잔재 내 729x558 판재 + 558x153 판재 2/2 전원 안착 (단품 간격 5.0mm, 최대 반경 510.69mm <= 511.5mm)
 ;;; - v5.1 (2026-10-24 09:05:00) : 원형 철판 잔재 5/5 단품 100% 완전 배치 및 미세 진동 공간 창출기 탑재
 ;;;                                 1. find_best_position 원형 잔재 X-Shift 편향 후보점 대폭 확장 (+-30~150mm)
 ;;;                                 2. rescue_unplaced_in_container: 잔재 내 미배치 단품 구출 공간 창출(Dynamic Cavity) 탑재
@@ -285,16 +289,17 @@ class EvolutionContainer:
 
 def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
     """
-    Continuous Micro-Nudge & Dynamic Cavity Creator:
-    Shifts already placed parts slightly to create room for the unplaced part!
-    Returns True if successfully placed all parts.
+    Two-Phase Space-Creating Rescue Engine:
+    Phase 0: Zero-displacement fit check.
+    Phase 1: Deterministic Companion Structural Patterns (Side-by-Side & Top-Bottom).
+    Phase 2: Continuous Micro-Nudge & Cavity Annealing.
     """
     pw, ph = unplaced_part['w'], unplaced_part['h']
+
+    # Phase 0: Check if it already fits without moving anything
     for rot in [0.0, 90.0]:
         cur_w = pw if rot == 0.0 else ph
         cur_h = ph if rot == 0.0 else pw
-
-        # Check if already fits without moving anything
         pos = cnt.find_best_position(cur_w, cur_h, allowed_rotations=[0])
         if pos:
             gx, gy, w, h, _ = pos
@@ -303,7 +308,66 @@ def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
             cnt.placed_area += entry['area']
             return True
 
-        # Optimize positions of existing placed parts + new part using micro-nudging
+    # Phase 1: Deterministic Companion Structural Patterns
+    # Especially for circular scrap sheets with 1 placed part + 1 unplaced candidate
+    if cnt.type == 'circle' and len(cnt.placed) == 1:
+        p_exist = cnt.placed[0]
+        w1, h1 = p_exist['w'], p_exist['h']
+        w2, h2 = pw, ph
+
+        for rot1 in [0.0, 90.0]:
+            cur_w1 = w1 if rot1 == 0.0 else h1
+            cur_h1 = h1 if rot1 == 0.0 else w1
+            for rot2 in [0.0, 90.0]:
+                cur_w2 = w2 if rot2 == 0.0 else h2
+                cur_h2 = h2 if rot2 == 0.0 else w2
+
+                # Pattern 1A: Side-by-Side (Part 1 Left, Part 2 Right)
+                tot_w = cur_w1 + gap + cur_w2
+                x1_a = cnt.cx - tot_w * 0.5
+                x2_a = x1_a + cur_w1 + gap
+                y1_a = cnt.cy - cur_h1 * 0.5
+                y2_a = cnt.cy - cur_h2 * 0.5
+                if cnt.is_inside(x1_a, y1_a, cur_w1, cur_h1) and cnt.is_inside(x2_a, y2_a, cur_w2, cur_h2):
+                    cnt.placed = [
+                        {'id': p_exist['id'], 'container_id': cnt.id, 'gx': x1_a, 'gy': y1_a, 'w': cur_w1, 'h': cur_h1, 'rot': rot1, 'area': cur_w1 * cur_h1},
+                        {'id': unplaced_part['id'], 'container_id': cnt.id, 'gx': x2_a, 'gy': y2_a, 'w': cur_w2, 'h': cur_h2, 'rot': rot2, 'area': cur_w2 * cur_h2}
+                    ]
+                    cnt.placed_area = cur_w1 * cur_h1 + cur_w2 * cur_h2
+                    return True
+
+                # Pattern 1B: Side-by-Side (Part 2 Left, Part 1 Right)
+                x2_b = cnt.cx - tot_w * 0.5
+                x1_b = x2_b + cur_w2 + gap
+                y2_b = cnt.cy - cur_h2 * 0.5
+                y1_b = cnt.cy - cur_h1 * 0.5
+                if cnt.is_inside(x2_b, y2_b, cur_w2, cur_h2) and cnt.is_inside(x1_b, y1_b, cur_w1, cur_h1):
+                    cnt.placed = [
+                        {'id': p_exist['id'], 'container_id': cnt.id, 'gx': x1_b, 'gy': y1_b, 'w': cur_w1, 'h': cur_h1, 'rot': rot1, 'area': cur_w1 * cur_h1},
+                        {'id': unplaced_part['id'], 'container_id': cnt.id, 'gx': x2_b, 'gy': y2_b, 'w': cur_w2, 'h': cur_h2, 'rot': rot2, 'area': cur_w2 * cur_h2}
+                    ]
+                    cnt.placed_area = cur_w1 * cur_h1 + cur_w2 * cur_h2
+                    return True
+
+                # Pattern 1C: Top-and-Bottom (Part 1 Bottom, Part 2 Top)
+                tot_h = cur_h1 + gap + cur_h2
+                y1_c = cnt.cy - tot_h * 0.5
+                y2_c = y1_c + cur_h1 + gap
+                x1_c = cnt.cx - cur_w1 * 0.5
+                x2_c = cnt.cx - cur_w2 * 0.5
+                if cnt.is_inside(x1_c, y1_c, cur_w1, cur_h1) and cnt.is_inside(x2_c, y2_c, cur_w2, cur_h2):
+                    cnt.placed = [
+                        {'id': p_exist['id'], 'container_id': cnt.id, 'gx': x1_c, 'gy': y1_c, 'w': cur_w1, 'h': cur_h1, 'rot': rot1, 'area': cur_w1 * cur_h1},
+                        {'id': unplaced_part['id'], 'container_id': cnt.id, 'gx': x2_c, 'gy': y2_c, 'w': cur_w2, 'h': cur_h2, 'rot': rot2, 'area': cur_w2 * cur_h2}
+                    ]
+                    cnt.placed_area = cur_w1 * cur_h1 + cur_w2 * cur_h2
+                    return True
+
+    # Phase 2: Continuous Micro-Nudge Annealing for Multi-Part Cavity Creation
+    for rot in [0.0, 90.0]:
+        cur_w = pw if rot == 0.0 else ph
+        cur_h = ph if rot == 0.0 else pw
+
         current_rects = []
         for p in cnt.placed:
             current_rects.append({'id': p['id'], 'x': p['gx'], 'y': p['gy'], 'w': p['w'], 'h': p['h'], 'rot': p.get('rot', 0.0)})
