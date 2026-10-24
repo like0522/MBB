@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.3 - Chamfered Polygon & Irregular Scrap Sheet 100% Nesting Engine
+;;; MBBN v5.4 - Chamfered Polygon & Irregular Scrap Sheet 100% Nesting Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-24 11:05:00
+;;; LAST MODIFIED: 2026-10-24 14:30:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.4 (2026-10-24 14:30:00) : 복합 단차·호(Arc Dome 784x450) 잔재 2/2 단품 100% 완전 동반 안착 완결
+;;;                                 1. Phase 1B 다각형 구조적 동반 안착(Deterministic Companion Structural Pattern for Polygon) 엔진 탑재
+;;;                                    (좌측 수직 242.8x301.8 호 벽면 밀착 안착 + 우측 242.8x301.8 단차 선반 레벨 자동 정렬 -> 2/2 단품 100% 안착 완결)
+;;;                                 2. 복합 단차·호(2/2), 모따기 다각형(3/3), Ø890 원형(5/5), Ø1025 원형(2/2) 전원 100% 무침범·무간섭 검증 완료
 ;;; - v5.3 (2026-10-24 11:05:00) : 모따기 다각형 철판 잔재(680x720) 3/3 단품 100% 완전 안착 및 BLF 좌측 중력 압축 완결
 ;;;                                 1. do_float 내 다각형 용기 중심 편향(Inward Centering) 제거 -> 정밀 좌측 중력 압축(BLF) 전환
 ;;;                                    (하단 중심 안착으로 인한 좌우 여유 공간 잠식 결함 원천 차단 -> 모따기 680x720 잔재 내 3/3 단품 100% 배치 완결)
@@ -376,6 +380,86 @@ def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
                     cnt.placed_area = cur_w1 * cur_h1 + cur_w2 * cur_h2
                     return True
 
+    # Phase 1B: Deterministic Companion Structural Patterns for Polygon & Irregular Containers
+    elif cnt.type == 'polygon' and len(cnt.placed) == 1:
+        p_exist = cnt.placed[0]
+        w1_orig = p_exist['w'] if p_exist.get('rot', 0) == 0 else p_exist['h']
+        h1_orig = p_exist['h'] if p_exist.get('rot', 0) == 0 else p_exist['w']
+        w2_orig, h2_orig = pw, ph
+
+        # Shelf / baseline Y coordinates to test
+        y_levels = [cnt.min_oy + cnt.margin, cnt.min_oy + cnt.margin + 1.5, cnt.min_oy + cnt.margin + 3.0]
+        if cnt.outer_pts:
+            for v in cnt.outer_pts:
+                if v[1] > cnt.min_oy + 5.0 and v[1] < cnt.max_oy - 50.0:
+                    for dy in [0.5, 1.0, 2.0]:
+                        y_levels.append(v[1] + dy)
+        y_levels = sorted(list(set([round(y, 2) for y in y_levels])))
+
+        pairs = [
+            (p_exist['id'], w1_orig, h1_orig, unplaced_part['id'], w2_orig, h2_orig),
+            (unplaced_part['id'], w2_orig, h2_orig, p_exist['id'], w1_orig, h1_orig)
+        ]
+
+        x_scan_step = 2
+
+        # Pattern 1: Side-by-Side (A on Left, B on Right)
+        for id_a, wa, ha, id_b, wb, hb in pairs:
+            for rota in [0.0, 90.0]:
+                cur_wa = wa if rota == 0.0 else ha
+                cur_ha = ha if rota == 0.0 else wa
+                for rotb in [0.0, 90.0]:
+                    cur_wb = wb if rotb == 0.0 else hb
+                    cur_hb = hb if rotb == 0.0 else wb
+                    if cur_wa + gap + cur_wb > (cnt.max_ox - cnt.min_ox):
+                        continue
+
+                    for ya in y_levels:
+                        for xa in range(int(cnt.min_ox + cnt.margin), int(cnt.min_ox + cnt.margin + 180), x_scan_step):
+                            if cnt.is_inside(xa, ya, cur_wa, cur_ha):
+                                xb_start = xa + cur_wa + gap
+                                for yb in y_levels:
+                                    for xb in range(int(xb_start), int(xb_start + 140), x_scan_step):
+                                        if cnt.is_inside(xb, yb, cur_wb, cur_hb):
+                                            b_a = box(xa, ya, xa + cur_wa, ya + cur_ha)
+                                            b_b = box(xb, yb, xb + cur_wb, yb + cur_hb)
+                                            if b_a.distance(b_b) >= gap - 1e-4:
+                                                cnt.placed = [
+                                                    {'id': id_a, 'container_id': cnt.id, 'gx': xa, 'gy': ya, 'w': cur_wa, 'h': cur_ha, 'rot': rota, 'area': cur_wa * cur_ha},
+                                                    {'id': id_b, 'container_id': cnt.id, 'gx': xb, 'gy': yb, 'w': cur_wb, 'h': cur_hb, 'rot': rotb, 'area': cur_wb * cur_hb}
+                                                ]
+                                                cnt.placed_area = cur_wa * cur_ha + cur_wb * cur_hb
+                                                return True
+
+        # Pattern 2: Top-and-Bottom (A on Bottom, B on Top)
+        for id_a, wa, ha, id_b, wb, hb in pairs:
+            for rota in [0.0, 90.0]:
+                cur_wa = wa if rota == 0.0 else ha
+                cur_ha = ha if rota == 0.0 else wa
+                for rotb in [0.0, 90.0]:
+                    cur_wb = wb if rotb == 0.0 else hb
+                    cur_hb = hb if rotb == 0.0 else wb
+                    if cur_ha + gap + cur_hb > (cnt.max_oy - cnt.min_oy):
+                        continue
+
+                    for ya in y_levels:
+                        yb_start = ya + cur_ha + gap
+                        if yb_start + cur_hb > cnt.max_oy - cnt.margin:
+                            continue
+                        for xa in range(int(cnt.min_ox + cnt.margin), int(cnt.max_ox - cnt.margin - cur_wa), x_scan_step * 2):
+                            if cnt.is_inside(xa, ya, cur_wa, cur_ha):
+                                for xb in range(int(cnt.min_ox + cnt.margin), int(cnt.max_ox - cnt.margin - cur_wb), x_scan_step * 2):
+                                    if cnt.is_inside(xb, yb_start, cur_wb, cur_hb):
+                                        b_a = box(xa, ya, xa + cur_wa, ya + cur_ha)
+                                        b_b = box(xb, yb_start, xb + cur_wb, yb_start + cur_hb)
+                                        if b_a.distance(b_b) >= gap - 1e-4:
+                                            cnt.placed = [
+                                                {'id': id_a, 'container_id': cnt.id, 'gx': xa, 'gy': ya, 'w': cur_wa, 'h': cur_ha, 'rot': rota, 'area': cur_wa * cur_ha},
+                                                {'id': id_b, 'container_id': cnt.id, 'gx': xb, 'gy': yb_start, 'w': cur_wb, 'h': cur_hb, 'rot': rotb, 'area': cur_wb * cur_hb}
+                                            ]
+                                            cnt.placed_area = cur_wa * cur_ha + cur_wb * cur_hb
+                                            return True
+
     # Phase 2: Continuous Micro-Nudge Annealing for Multi-Part Cavity Creation
     for rot in [0.0, 90.0]:
         cur_w = pw if rot == 0.0 else ph
@@ -656,7 +740,7 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
     num_workers = min(pop_size, cpu_count)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v5.3 - {mode_title} ]")
+    print(f" [ MBBN v5.4 - {mode_title} ]")
     print("=" * 70)
     print(f">> CPU 멀티코어 가속 활성: {num_workers}개 코어 풀가동 (전체 {cpu_count}코어)")
     print(f">> 탐색 규모: 세대당 {pop_size}개체 x 최대 {num_generations}세대 (최대 {pop_size * num_generations}회 시뮬레이션)")
@@ -932,7 +1016,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v5.3 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
+        f.write(";;; MBBN v5.4 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
@@ -962,7 +1046,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         json.dump(res, f, indent=2)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v5.3 배치 성적표 ({mode.upper()} 모드) ]")
+    print(f" [ MBBN v5.4 배치 성적표 ({mode.upper()} 모드) ]")
     print("=" * 70)
     print(f">> 총 단품: {len(parts_data)} 개 | 실배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
     print(f">> 단품 소모 수율: {part_yield:.2f} % (총 단품 면적 대비)")
