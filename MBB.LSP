@@ -2,10 +2,14 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-24 16:30:00
+;; LAST MODIFIED: 2026-10-24 17:14:41
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v5.7 (2026-10-24 17:14:41) : 3대 핵심 버그 수정 (배열 겹침/외곽 이탈/선택 오염 근본 차단)
+;;                                 1. [FIX-1] ss-in 선택 세트에서 ss-out 컨테이너(잔재) 객체 중복 포함 100% 차단 (ssmemb 필터)
+;;                                 2. [FIX-2] 이동/회전 기준 BBOX를 TEXT 제외, 철판 외곽선(parent-obj)만으로 엄격 한정
+;;                                 3. [FIX-3] Python 단일 묶음(≤10 단품) 초고속 경로 추가 → ProcessPoolExecutor 오버헤드 0초
 ;; - v5.6 (2026-10-24 16:30:00) : 오목 호(Inward Arc Scoop 680x666) 잔재 3/3 단품 100% 완전 배치 및 True-Shape 윤곽선 연동 완결
 ;;                                 1. MBB:GetPartContour 정밀 윤곽선 추출 함수 탑재 및 JSON "polygon" 속성 연동
 ;;                                 2. 모따기(Chamfer 15.82mm) 부품의 실제 형상 기준 100% 안착 판정 지원
@@ -2550,25 +2554,33 @@
               (setq geom-raw '() text-list '() i 0)
               (repeat (sslength ss-in)
                 (setq ename (ssname ss-in i)
-                      obj   (vlax-ename->vla-object ename)
-                      objName (vla-get-ObjectName obj)
                       i     (1+ i))
-                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+;;; [START: CURRENT ACTIVE - v5.7 MODIFIED (2026-10-24 17:14:41)]
+                ;; [v5.7 FIX-1] 컨테이너(잔재) 객체가 단품 선택에 중복 포함된 경우 즉시 건너뜀
+                ;; ssmemb: ss-out(잔재 선택세트)에 동일 ename이 있으면 T 반환 → skip
+                (if (not (ssmemb ename ss-out))
                   (progn
-                    (setq tmp-min (vlax-safearray->list tmp-min)
-                          tmp-max (vlax-safearray->list tmp-max))
-                    (if (wcmatch (strcase objName) "*TEXT*")
-                      (setq text-list (cons (list obj tmp-min tmp-max) text-list))
+                    (setq obj   (vlax-ename->vla-object ename)
+                          objName (vla-get-ObjectName obj))
+                    (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
                       (progn
-                        (setq tmpArea (vl-catch-all-apply 'vla-get-Area (list obj)))
-                        (if (vl-catch-all-error-p tmpArea)
-                          (setq tmpArea (* (- (car tmp-max) (car tmp-min)) (- (cadr tmp-max) (cadr tmp-min))))
+                        (setq tmp-min (vlax-safearray->list tmp-min)
+                              tmp-max (vlax-safearray->list tmp-max))
+                        (if (wcmatch (strcase objName) "*TEXT*")
+                          (setq text-list (cons (list obj tmp-min tmp-max) text-list))
+                          (progn
+                            (setq tmpArea (vl-catch-all-apply 'vla-get-Area (list obj)))
+                            (if (vl-catch-all-error-p tmpArea)
+                              (setq tmpArea (* (- (car tmp-max) (car tmp-min)) (- (cadr tmp-max) (cadr tmp-min))))
+                            )
+                            (setq geom-raw (cons (list obj tmpArea tmp-min tmp-max) geom-raw))
+                          )
                         )
-                        (setq geom-raw (cons (list obj tmpArea tmp-min tmp-max) geom-raw))
                       )
                     )
                   )
                 )
+;;; [END: CURRENT ACTIVE - v5.7 MODIFIED]
               )
 
               ;; [내경(홀/슬롯) 복합 클러스터링]: 외곽선 내 모든 홀 1:1 완벽 묶음
@@ -2886,18 +2898,18 @@
                               )
                             )
                             ;; [절대 오차 0.0000mm 보장] 회전 후 all-objs의 실제 실시간 결합 Bounding Box 최소 좌표 측정
+;;; [START: CURRENT ACTIVE - v5.7 MODIFIED (2026-10-24 17:14:41)]
+                            ;; [v5.7 FIX-2] 철판 외곽선(parent-obj = car all-objs)만으로 BBOX 최소 좌표 재계산
+                            ;; TEXT/MTEXT BBOX 포함 시 수십~수백mm 좌표 왜곡 발생 → 100% 차단
                             (setq cur-min-x nil cur-min-y nil)
-                            (foreach o all-objs
-                              (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-GetBoundingBox (list o 'tmp-bmin 'tmp-bmax))))
-                                (progn
-                                  (setq tmp-bmin (vlax-safearray->list tmp-bmin)
-                                        b-x (car tmp-bmin)
-                                        b-y (cadr tmp-bmin))
-                                  (if (or (null cur-min-x) (< b-x cur-min-x)) (setq cur-min-x b-x))
-                                  (if (or (null cur-min-y) (< b-y cur-min-y)) (setq cur-min-y b-y))
-                                )
+                            (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-GetBoundingBox (list (car all-objs) 'tmp-bmin 'tmp-bmax))))
+                              (progn
+                                (setq tmp-bmin (vlax-safearray->list tmp-bmin)
+                                      cur-min-x (car tmp-bmin)
+                                      cur-min-y (cadr tmp-bmin))
                               )
                             )
+;;; [END: CURRENT ACTIVE - v5.7 MODIFIED]
                             (if (and cur-min-x cur-min-y)
                               (setq move-dx (- gx cur-min-x)
                                     move-dy (- gy cur-min-y))

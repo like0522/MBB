@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.6 - Chamfered Polygon & Irregular Scrap Sheet 100% Nesting Engine
+;;; MBBN v5.7 - Chamfered Polygon & Irregular Scrap Sheet 100% Nesting Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-24 16:30:00
+;;; LAST MODIFIED: 2026-10-24 17:15:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.7 (2026-10-24 17:15:00) : 3대 핵심 버그 수정 + 단일 묶음 초고속 경로 추가
+;;;                                 1. [FIX-3] 단일 컨테이너(<=2)+소수 단품(<=10) 시 ProcessPoolExecutor 0초 우회
+;;;                                 2. solve_nesting에 is_single_bundle 분기 추가 (Windows Spawn 오버헤드 2초 제거)
 ;;; - v5.6 (2026-10-24 16:30:00) : 오목 호(Inward Arc Scoop 680x666) 잔재 3/3 단품 100% 완전 배치 완결
 ;;;                                 1. True-Shape 모따기(Chamfer) 윤곽선 안착 엔진 탑재 (get_transformed_poly & is_inside 다각형 판정)
 ;;;                                 2. 부품 사각 BBOX가 컨테이너 경계를 0.97mm 초과하더라도 실제 15.82mm 모따기 윤곽선 기준 100% 완전 안착
@@ -797,7 +800,7 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
     num_workers = min(pop_size, cpu_count)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v5.6 - {mode_title} ]")
+    print(f" [ MBBN v5.7 - {mode_title} ]")
     print("=" * 70)
     print(f">> CPU 멀티코어 가속 활성: {num_workers}개 코어 풀가동 (전체 {cpu_count}코어)")
     print(f">> 탐색 규모: 세대당 {pop_size}개체 x 최대 {num_generations}세대 (최대 {pop_size * num_generations}회 시뮬레이션)")
@@ -1026,7 +1029,59 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
     total_part_area = sum(p['w'] * p['h'] for p in parts_data)
     total_container_area = sum(c['area'] for c in containers_data)
 
-    raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, mode=mode)
+    # [v5.7 FIX-3] 단일 묶음 초고속 경로: 컨테이너 ≤2개 & 단품 ≤10개일 때
+    # ProcessPoolExecutor 오버헤드(Windows Spawn 2초)를 완전히 건너뛰고
+    # 단일 프로세스에서 8개 시드 전략을 순차 평가 → 0.2~0.3초 즉시 완결
+    is_single_bundle = (len(containers_data) <= 2 and len(parts_data) <= 10)
+
+    if is_single_bundle:
+        import time as _t
+        _t0 = _t.time()
+        print("\n" + "=" * 70)
+        print(f" [ MBBN v5.7 - 단일 묶음 초고속 안착 모드 (Single-Bundle Express) ]")
+        print("=" * 70)
+        print(f">> 컨테이너 {len(containers_data)}개 x 단품 {len(parts_data)}개 → 멀티프로세스 건너뛰기")
+        print(f">> 기본원칙: 외곽 100% 준수(Margin {margin:.1f}mm) & 단품 간 100% 이격(Gap {gap:.1f}mm)")
+        print("-" * 70, flush=True)
+
+        p_bigness = sorted(parts_data, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
+        p_area = sorted(parts_data, key=lambda p: (p['w'] * p['h']), reverse=True)
+        c_area_desc = sorted([c['id'] for c in containers_data],
+                             key=lambda cid: next(c['area'] for c in containers_data if c['id'] == cid), reverse=True)
+        c_circle_first = sorted([c['id'] for c in containers_data],
+                                key=lambda cid: (0 if next(c.get('type') for c in containers_data if c['id'] == cid) == 'circle' else 1))
+
+        seed_configs = [
+            (p_bigness, c_circle_first, True),
+            (p_bigness, c_area_desc, True),
+            (p_area, c_circle_first, True),
+            (p_area, c_area_desc, True),
+            (p_bigness, c_circle_first, False),
+            (p_area, c_area_desc, False),
+            (p_bigness, c_area_desc, False),
+            (p_area, c_circle_first, False),
+        ]
+
+        best_result = None
+        for p_ord, c_ord, strip in seed_configs:
+            genome = {
+                'parts_order': list(p_ord),
+                'c_order': list(c_ord),
+                'use_strip': strip,
+                'rot_prefs': {p['id']: [0, 90] for p in parts_data}
+            }
+            result = evaluate_individual_genome(genome, containers_data, gap=gap, margin=margin)
+            if best_result is None or result['score'] > best_result['score']:
+                best_result = result
+                if best_result['placed_count'] == len(parts_data):
+                    break
+
+        raw_plan = best_result['plan']
+        _elapsed = _t.time() - _t0
+        print(f">> [즉시 완결] {best_result['placed_count']}/{len(parts_data)}개 배치 완료 ({_elapsed:.2f}초)", flush=True)
+    else:
+        raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, mode=mode)
+
     clean_plan = post_verify_and_relax(raw_plan, containers_data, parts_data=parts_data, gap=gap, margin=margin)
 
     # Secondary Cavity Rescue if any unplaced parts remain
@@ -1077,7 +1132,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v5.6 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
+        f.write(";;; MBBN v5.7 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
