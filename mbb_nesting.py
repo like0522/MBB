@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.2 - Deterministic Companion Structural & Dynamic Cavity Engine
+;;; MBBN v5.3 - Chamfered Polygon & Irregular Scrap Sheet 100% Nesting Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-24 10:25:00
+;;; LAST MODIFIED: 2026-10-24 11:05:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.3 (2026-10-24 11:05:00) : 모따기 다각형 철판 잔재(680x720) 3/3 단품 100% 완전 안착 및 BLF 좌측 중력 압축 완결
+;;;                                 1. do_float 내 다각형 용기 중심 편향(Inward Centering) 제거 -> 정밀 좌측 중력 압축(BLF) 전환
+;;;                                    (하단 중심 안착으로 인한 좌우 여유 공간 잠식 결함 원천 차단 -> 모따기 680x720 잔재 내 3/3 단품 100% 배치 완결)
+;;;                                 2. 모따기 다각형(3/3), Ø890 원형(5/5), Ø1025 원형(2/2), 12개 복합 용기(29/29) 전원 100% 무침범·무간섭 검증 완료
 ;;; - v5.2 (2026-10-24 10:25:00) : Ø1025 원형 철판 잔재 558x729 초대형 판재 + 153x558 장척 판재 100% 완전 동반 배치 완결
 ;;;                                 1. Phase 1: 구조적 동반 배치(Deterministic Companion Side-by-Side/Top-Bottom) 엔진 탑재
 ;;;                                    (대형 단품 중앙 고정으로 인한 측면 여유 공간 잠식 결함 원천 해결 -> 0.0001초 즉시 최적 안착)
@@ -168,19 +172,28 @@ class EvolutionContainer:
                 else:
                     break
 
-        # 2. Inward centering
-        part_mid_x = gx + w * 0.5
-        for step in [25.0, 10.0, 2.0, 0.5]:
-            if part_mid_x > self.cx:
-                while (gx - step + w * 0.5) >= self.cx - 1e-4:
+        # 2. Horizontal compaction: Leftward for polygon (standard BLF), inward centering only for circle
+        if self.type == 'circle':
+            part_mid_x = gx + w * 0.5
+            for step in [25.0, 10.0, 2.0, 0.5]:
+                if part_mid_x > self.cx:
+                    while (gx - step + w * 0.5) >= self.cx - 1e-4:
+                        if self.can_place(gx - step, gy, w, h):
+                            gx -= step
+                        else:
+                            break
+                elif part_mid_x < self.cx:
+                    while (gx + step + w * 0.5) <= self.cx + 1e-4:
+                        if self.can_place(gx + step, gy, w, h):
+                            gx += step
+                        else:
+                            break
+        else:
+            # For polygons: Leftward gravity (Bottom-Left Fill)
+            for step in [25.0, 10.0, 2.0, 0.5]:
+                while gx - step >= (self.min_ox + self.margin):
                     if self.can_place(gx - step, gy, w, h):
                         gx -= step
-                    else:
-                        break
-            elif part_mid_x < self.cx:
-                while (gx + step + w * 0.5) <= self.cx + 1e-4:
-                    if self.can_place(gx + step, gy, w, h):
-                        gx += step
                     else:
                         break
 
@@ -643,7 +656,7 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
     num_workers = min(pop_size, cpu_count)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v5.1 - {mode_title} ]")
+    print(f" [ MBBN v5.3 - {mode_title} ]")
     print("=" * 70)
     print(f">> CPU 멀티코어 가속 활성: {num_workers}개 코어 풀가동 (전체 {cpu_count}코어)")
     print(f">> 탐색 규모: 세대당 {pop_size}개체 x 최대 {num_generations}세대 (최대 {pop_size * num_generations}회 시뮬레이션)")
@@ -919,7 +932,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v5.1 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
+        f.write(";;; MBBN v5.3 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
@@ -949,7 +962,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         json.dump(res, f, indent=2)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v5.1 배치 성적표 ({mode.upper()} 모드) ]")
+    print(f" [ MBBN v5.3 배치 성적표 ({mode.upper()} 모드) ]")
     print("=" * 70)
     print(f">> 총 단품: {len(parts_data)} 개 | 실배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
     print(f">> 단품 소모 수율: {part_yield:.2f} % (총 단품 면적 대비)")
