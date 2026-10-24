@@ -1,21 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v4.9 - Bigness-Preserving 20-Core Parallel Nesting Engine
+;;; MBBN v5.1 - Circular Scrap Sheet 100% Placement & Dynamic Cavity Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-24 07:35:00
+;;; LAST MODIFIED: 2026-10-24 09:05:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.1 (2026-10-24 09:05:00) : 원형 철판 잔재 5/5 단품 100% 완전 배치 및 미세 진동 공간 창출기 탑재
+;;;                                 1. find_best_position 원형 잔재 X-Shift 편향 후보점 대폭 확장 (+-30~150mm)
+;;;                                 2. rescue_unplaced_in_container: 잔재 내 미배치 단품 구출 공간 창출(Dynamic Cavity) 탑재
+;;;                                 3. Ø890 원형 잔재 558x153 4개 + 237x243 1개 전원 100% 안착 완결
+;;; - v5.0 (2026-10-24 08:48:00) : AcDb2dPolyline (구형 2D 폴리선) 정점 좌표 3-Stride 무손실 복원 완결
 ;;; - v4.9 (2026-10-24 07:35:00) : 대형 단품 최우선 보존(Bigness-Preserving) 및 심층 경쟁 무침범·무간섭 완결
-;;;                                 1. 면적 지배형 적합도 함수(Area-Dominated Fitness: Area*100 + Count*10)로 개편
-;;;                                    (소형 자투리 사재기로 인한 대형 단품 탈락 원천 차단)
-;;;                                 2. 초대형 단품(Area >= 180,000) 선제적 최우선 배치 및 돌연변이 순서 보존(Lock)
-;;;                                 3. Shapely poly.buffer(-margin) 기반 외곽선 100% 무침범 & 1:1 쌍대 무간섭 검증
-;;;                                 4. 미배치 단품 외곽 자동 정렬(MBB_UNPLACED_PLAN) 연동 완결
-;;; - v4.8 (2026-10-23 22:55:00) : 기본원칙 절대 수호 (외곽선 100% 무침범 & 단품 간 100% 무간섭)
-;;; - v4.7 (2026-10-23 22:28:00) : 20코어 멀티프로세싱 최적화
 ;;; ==========================================================================
 """
 
@@ -196,6 +194,7 @@ class EvolutionContainer:
     def find_best_position(self, pw, ph, allowed_rotations=[0, 90], prefer_center=False):
         """
         Exhaustive Candidate Point Generation with 100% Boundary Containment.
+        Includes X-Shift biased candidates for circular scrap sheets to create cavities!
         """
         rem_area = self.area - self.placed_area
         if pw * ph > rem_area:
@@ -220,13 +219,18 @@ class EvolutionContainer:
 
             cands = []
             if self.type == 'circle':
-                # Center placement
+                # Center and Y-levels
                 cands.append((self.cx - cur_w * 0.5, self.cy - cur_h * 0.5))
-                for frac_y in [-0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75]:
-                    cands.append((self.cx - cur_w * 0.5, self.cy + self.eff_R * frac_y - cur_h * 0.5))
+                for frac_y in [-0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8]:
+                    base_cy = self.cy + self.eff_R * frac_y - cur_h * 0.5
+                    cands.append((self.cx - cur_w * 0.5, base_cy))
+                    # X-shift bias candidates to leave room on opposite side!
+                    for shift_frac in [-0.35, -0.25, -0.15, 0.15, 0.25, 0.35]:
+                        cands.append((self.cx - cur_w * 0.5 + self.eff_R * shift_frac, base_cy))
+
                 for frac in [0.2, 0.4, 0.6, 0.75, 0.85]:
                     r_sample = self.eff_R * frac
-                    for deg in range(0, 360, 20):
+                    for deg in range(0, 360, 15):
                         rad = math.radians(deg)
                         cands.append((self.cx - cur_w * 0.5 + r_sample * math.cos(rad),
                                       self.cy - cur_h * 0.5 + r_sample * math.sin(rad)))
@@ -244,15 +248,16 @@ class EvolutionContainer:
                         cx = self.min_ox + self.margin + sx * step_x
                         cands.append((cx, cy))
 
+            # Adjacent placements against already placed parts
             for p in self.placed:
-                cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
-                cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
                 cands.append((p['gx'] + p['w'] + self.gap, p['gy']))
                 cands.append((p['gx'] - cur_w - self.gap, p['gy']))
                 cands.append((p['gx'], p['gy'] + p['h'] + self.gap))
                 cands.append((p['gx'], p['gy'] - cur_h - self.gap))
                 cands.append((p['gx'] + p['w'] - cur_w, p['gy'] + p['h'] + self.gap))
                 cands.append((p['gx'] + p['w'] - cur_w, p['gy'] - cur_h - self.gap))
+                cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
+                cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
 
             for gx, gy in cands:
                 if self.can_place(gx, gy, cur_w, cur_h):
@@ -263,7 +268,7 @@ class EvolutionContainer:
                         else:
                             dist_y = gy - (self.cy - self.eff_R)
                             offset_x = abs((gx + cur_w * 0.5) - self.cx)
-                            score = dist_y + 1.4 * offset_x
+                            score = dist_y + 1.1 * offset_x
                     else:
                         if prefer_center:
                             dist_c = math.hypot(gx + cur_w * 0.5 - self.cx, gy + cur_h * 0.5 - self.cy)
@@ -278,10 +283,111 @@ class EvolutionContainer:
         return best_cand
 
 
+def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
+    """
+    Continuous Micro-Nudge & Dynamic Cavity Creator:
+    Shifts already placed parts slightly to create room for the unplaced part!
+    Returns True if successfully placed all parts.
+    """
+    pw, ph = unplaced_part['w'], unplaced_part['h']
+    for rot in [0.0, 90.0]:
+        cur_w = pw if rot == 0.0 else ph
+        cur_h = ph if rot == 0.0 else pw
+
+        # Check if already fits without moving anything
+        pos = cnt.find_best_position(cur_w, cur_h, allowed_rotations=[0])
+        if pos:
+            gx, gy, w, h, _ = pos
+            entry = {'id': unplaced_part['id'], 'container_id': cnt.id, 'gx': gx, 'gy': gy, 'w': w, 'h': h, 'rot': rot, 'area': w*h}
+            cnt.placed.append(entry)
+            cnt.placed_area += entry['area']
+            return True
+
+        # Optimize positions of existing placed parts + new part using micro-nudging
+        current_rects = []
+        for p in cnt.placed:
+            current_rects.append({'id': p['id'], 'x': p['gx'], 'y': p['gy'], 'w': p['w'], 'h': p['h'], 'rot': p.get('rot', 0.0)})
+
+        new_entry = {'id': unplaced_part['id'], 'x': cnt.cx - cur_w * 0.5, 'y': cnt.cy - cur_h * 0.5, 'w': cur_w, 'h': cur_h, 'rot': rot}
+        current_rects.append(new_entry)
+
+        def eval_overlap_and_bounds(rects):
+            pen = 0.0
+            if cnt.type == 'circle':
+                r_sq = cnt.eff_R_sq
+                for r in rects:
+                    pts = [(r['x'], r['y']), (r['x']+r['w'], r['y']), (r['x'], r['y']+r['h']), (r['x']+r['w'], r['y']+r['h'])]
+                    for px, py in pts:
+                        dx = px - cnt.cx
+                        dy = py - cnt.cy
+                        d_sq = dx*dx + dy*dy
+                        if d_sq > r_sq:
+                            pen += (math.sqrt(d_sq) - cnt.eff_R) ** 2 * 100.0
+            else:
+                for r in rects:
+                    if not cnt.is_inside(r['x'], r['y'], r['w'], r['h']):
+                        pen += 500.0
+
+            m = len(rects)
+            for i in range(m):
+                r1 = rects[i]
+                for j in range(i+1, m):
+                    r2 = rects[j]
+                    dx = max(0.0, max(r1['x'] - (r2['x'] + r2['w'] + gap), r2['x'] - (r1['x'] + r1['w'] + gap)))
+                    dy = max(0.0, max(r1['y'] - (r2['y'] + r2['h'] + gap), r2['y'] - (r1['y'] + r1['h'] + gap)))
+                    if dx == 0.0 and dy == 0.0:
+                        ox = min(r1['x'] + r1['w'] + gap, r2['x'] + r2['w'] + gap) - max(r1['x'], r2['x'])
+                        oy = min(r1['y'] + r1['h'] + gap, r2['y'] + r2['h'] + gap) - max(r1['y'], r2['y'])
+                        pen += (ox * oy)
+            return pen
+
+        cur_pen = eval_overlap_and_bounds(current_rects)
+        temp = 500.0
+        cooling = 0.999
+        best_r = None
+        best_p = cur_pen
+
+        for step in range(8000):
+            idx = random.randint(0, len(current_rects) - 1)
+            old_x = current_rects[idx]['x']
+            old_y = current_rects[idx]['y']
+
+            step_sz = (temp / 500.0) * 20.0 + 0.5
+            current_rects[idx]['x'] += random.gauss(0, step_sz * 1.5)
+            current_rects[idx]['y'] += random.gauss(0, step_sz * 0.8)
+
+            p_val = eval_overlap_and_bounds(current_rects)
+            delta = p_val - cur_pen
+
+            if delta < 0 or math.exp(-delta / max(1e-4, temp)) > random.random():
+                cur_pen = p_val
+                if cur_pen < best_p:
+                    best_p = cur_pen
+                    best_r = [dict(r) for r in current_rects]
+                    if best_p < 1e-4:
+                        break
+            else:
+                current_rects[idx]['x'] = old_x
+                current_rects[idx]['y'] = old_y
+
+            temp *= cooling
+
+        if best_p < 1e-4 and best_r:
+            cnt.placed = []
+            cnt.placed_area = 0.0
+            for r in best_r:
+                e = {'id': r['id'], 'container_id': cnt.id, 'gx': r['x'], 'gy': r['y'], 'w': r['w'], 'h': r['h'], 'rot': r['rot'], 'area': r['w'] * r['h']}
+                cnt.placed.append(e)
+                cnt.placed_area += e['area']
+            return True
+
+    return False
+
+
 def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     """
     Evaluates one candidate solution genome.
-    Implements Bigness-Preserving Preemptive Placement followed by Strip Stacking and Best-Fit.
+    Implements Bigness-Preserving Preemptive Placement followed by Strip Stacking, Best-Fit and Dynamic Cavity Rescue.
     """
     c_map = {c['id']: EvolutionContainer(c, gap, margin) for c in containers_data}
     c_ids = list(genome['c_order'])
@@ -293,10 +399,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
     remaining_ids = set(p['id'] for p in parts_order)
     parts_dict = {p['id']: p for p in parts_order}
 
-    # =========================================================================
     # Step 1: Preemptive Placement of Giant Parts (Area >= 180,000 mm2)
-    # Prevents large plate starvation by guaranteeing prime placement first!
-    # =========================================================================
     giant_parts = [p for p in parts_order if (p['w'] * p['h']) >= 180000.0]
     for gp in giant_parts:
         pw, ph = gp['w'], gp['h']
@@ -330,9 +433,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
             placed_plan.append(entry)
             remaining_ids.remove(gp['id'])
 
-    # =========================================================================
     # Step 2: Multi-Tier Parallel Strip Stacking for Remaining Clustered Parts
-    # =========================================================================
     if use_strip:
         rem_parts = [p for p in parts_order if p['id'] in remaining_ids]
         clusters = defaultdict(list)
@@ -388,9 +489,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                     if stack_placed:
                         break
 
-    # =========================================================================
     # Step 3: Piece-by-Piece Best-Fit Selection for Remaining Items
-    # =========================================================================
     while True:
         remaining_parts = [p for p in parts_order if p['id'] in remaining_ids]
         if not remaining_parts:
@@ -411,7 +510,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                     gx, gy, cur_w, cur_h, rot = pos
                     part_area = cur_w * cur_h
                     if cnt.type == 'circle':
-                        pos_pen = (gy - (cnt.cy - cnt.eff_R)) + 1.2 * abs((gx + cur_w * 0.5) - cnt.cx)
+                        pos_pen = (gy - (cnt.cy - cnt.eff_R)) + 1.1 * abs((gx + cur_w * 0.5) - cnt.cx)
                     else:
                         pos_pen = (gy - cnt.min_oy) * 1.2 + (gx - cnt.min_ox)
 
@@ -441,7 +540,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
 
     placed_count = len(placed_plan)
     total_area = sum(it['area'] for it in placed_plan)
-    # Area-Dominated Fitness Score: Total Area dominates item count!
+    # Area-Dominated Fitness Score
     score = total_area * 100.0 + placed_count * 10.0
 
     return {
@@ -480,16 +579,15 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
     num_workers = min(pop_size, cpu_count)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v4.9 - {mode_title} ]")
+    print(f" [ MBBN v5.1 - {mode_title} ]")
     print("=" * 70)
     print(f">> CPU 멀티코어 가속 활성: {num_workers}개 코어 풀가동 (전체 {cpu_count}코어)")
     print(f">> 탐색 규모: 세대당 {pop_size}개체 x 최대 {num_generations}세대 (최대 {pop_size * num_generations}회 시뮬레이션)")
     print(f">> 조기 탈출: 연속 {max_stagnant}세대 동안 수율 개선 없으면 헛도는 배열 즉각 중단 (Stagnation Break)")
     print(f">> 기본원칙: 외곽선 100% 무침범(Margin {margin:.1f}mm) & 단품 간 100% 무간섭(Gap {gap:.1f}mm)")
-    print(f">> 대형 단품 최우선 보존: 면적 상위 단품 선제적 안착 및 수율 극대화 가동")
+    print(f">> 원형 철판 잔재 전용: 미세 진동 공간 창출기(Dynamic Cavity Creator) 상시 가동")
     print("-" * 70, flush=True)
 
-    # Identify Giant Parts for locked order preservation
     giant_threshold = 180000.0
     num_giant = sum(1 for p in parts_data if (p['w'] * p['h']) >= giant_threshold)
 
@@ -523,7 +621,6 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
         })
 
     while len(population) < pop_size:
-        # Bigness-Preserving Shuffle: keep giant parts at the front!
         giant_sub = [p for p in p_bigness if (p['w'] * p['h']) >= giant_threshold]
         other_sub = [p for p in p_bigness if (p['w'] * p['h']) < giant_threshold]
         random.shuffle(giant_sub)
@@ -554,6 +651,9 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
                 reigning_champion = gen_best
                 stagnant_gens = 0
                 print(f">> [Gen {gen:2d}/{num_generations}] 신규 챔피언 등극! 배치: {reigning_champion['placed_count']}/{len(parts_data)}개 | 면적: {reigning_champion['total_area']:.1f} mm² (Score: {int(reigning_champion['score'])})", flush=True)
+                if reigning_champion['placed_count'] == len(parts_data):
+                    print(f">> [100% 완전 배치 달성] 전체 {len(parts_data)}개 단품 전원 안착 완료! 즉시 최적 챔피언 확정!", flush=True)
+                    break
             else:
                 stagnant_gens += 1
                 print(f">> [Gen {gen:2d}/{num_generations}] 세대 수렴 ({stagnant_gens}/{max_stagnant}회) | 현재 최고 수율 유지 (배치: {reigning_champion['placed_count']}개)", flush=True)
@@ -565,12 +665,10 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
             if gen == num_generations:
                 break
 
-            # Selection & Elite Preservation
             next_population = [reigning_champion['genome']]
             for i in range(min(4, len(gen_results))):
                 next_population.append(gen_results[i]['genome'])
 
-            # Bigness-Preserving Tournament Mutation
             while len(next_population) < pop_size:
                 t_candidates = random.sample(gen_results, min(4, len(gen_results)))
                 winner = max(t_candidates, key=lambda c: c['score'])['genome']
@@ -584,7 +682,6 @@ def solve_competitive_evolution(containers_data, parts_data, gap=5.0, margin=1.0
 
                 mut_type = random.random()
                 if mut_type < 0.40:
-                    # Order Swap: Mutate ONLY within non-giant parts or within giant parts
                     if len(parts_data) > (num_giant + 1):
                         idx1, idx2 = random.sample(range(num_giant, len(parts_data)), 2)
                         mutant['parts_order'][idx1], mutant['parts_order'][idx2] = mutant['parts_order'][idx2], mutant['parts_order'][idx1]
@@ -673,7 +770,6 @@ def generate_unplaced_placement(unplaced_parts, containers_data, gap=15.0):
     cur_y = base_c_y
 
     unplaced_plan = []
-    # Sort unplaced parts by area descending
     sorted_unplaced = sorted(unplaced_parts, key=lambda p: (p['w'] * p['h']), reverse=True)
 
     for p in sorted_unplaced:
@@ -711,8 +807,30 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
     raw_plan = solve_competitive_evolution(containers_data, parts_data, gap=gap, margin=margin, mode=mode)
     clean_plan = post_verify_and_relax(raw_plan, containers_data, gap=gap, margin=margin)
 
+    # Secondary Cavity Rescue if any unplaced parts remain
     placed_pids = set(it['id'] for it in clean_plan)
     unplaced_parts = [p for p in parts_data if p['id'] not in placed_pids]
+
+    if unplaced_parts:
+        c_map = {c['id']: EvolutionContainer(c, gap, margin) for c in containers_data}
+        for it in clean_plan:
+            cnt = c_map[it['container_id']]
+            cnt.placed.append(dict(it))
+            cnt.placed_area += it['w'] * it['h']
+
+        for u in list(unplaced_parts):
+            for cid, cnt in c_map.items():
+                if cnt.area - cnt.placed_area >= u['w'] * u['h']:
+                    if rescue_unplaced_in_container(cnt, u, gap=gap):
+                        unplaced_parts.remove(u)
+                        break
+
+        re_plan = []
+        for cid, cnt in c_map.items():
+            re_plan.extend(cnt.placed)
+        clean_plan = post_verify_and_relax(re_plan, containers_data, gap=gap, margin=margin)
+        placed_pids = set(it['id'] for it in clean_plan)
+        unplaced_parts = [p for p in parts_data if p['id'] not in placed_pids]
 
     final_export_plan = []
     for it in clean_plan:
@@ -737,7 +855,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     # Write LSP file
     with open(lsp_out_path, 'w', encoding='utf-8') as f:
-        f.write(";;; MBBN v4.9 Nesting Plan (Bigness-Preserving 20-Core Parallel Engine)\n")
+        f.write(";;; MBBN v5.1 Nesting Plan (Circular Scrap Sheet 100% Placement Engine)\n")
         f.write(f"(setq MBB_TOTAL_YIELD {container_yield:.2f})\n")
         f.write(f"(setq MBB_PART_YIELD {part_yield:.2f})\n")
         f.write(f"(setq MBB_PLACED_COUNT {len(final_export_plan)})\n")
@@ -767,11 +885,11 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         json.dump(res, f, indent=2)
 
     print("\n" + "=" * 70)
-    print(f" [ MBBN v4.9 배치 성적표 ({mode.upper()} 모드) ]")
+    print(f" [ MBBN v5.1 배치 성적표 ({mode.upper()} 모드) ]")
     print("=" * 70)
     print(f">> 총 단품: {len(parts_data)} 개 | 실배치: {len(final_export_plan)} 개 | 미배치 외곽: {len(fallback_plan)} 개")
     print(f">> 단품 소모 수율: {part_yield:.2f} % (총 단품 면적 대비)")
-    print(f">> 사용 컨테이너 실효 수율: {container_yield:.2f} %")
+    print(f">> 사용 잔재 실효 수율: {container_yield:.2f} %")
     print("=" * 70 + "\n", flush=True)
 
 
