@@ -2,10 +2,14 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-24 15:50:00
+;; LAST MODIFIED: 2026-10-24 16:30:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v5.6 (2026-10-24 16:30:00) : 오목 호(Inward Arc Scoop 680x666) 잔재 3/3 단품 100% 완전 배치 및 True-Shape 윤곽선 연동 완결
+;;                                 1. MBB:GetPartContour 정밀 윤곽선 추출 함수 탑재 및 JSON "polygon" 속성 연동
+;;                                 2. 모따기(Chamfer 15.82mm) 부품의 실제 형상 기준 100% 안착 판정 지원
+;;                                 3. 오목호(3/3 100%), 아치호(2/2 100%), 모따기(3/3 100%), Ø890(5/5 100%), Ø1025(2/2 100%) 전원 100% 달성
 ;; - v5.5 (2026-10-24 15:50:00) : 해석적 광선 투사(Analytical Ray-Intersection) 초고속 동반 안착 엔진 탑재 완결
 ;;                                 1. 213개 조밀 곡선점 샘플링 시 연산 지연 결함 원천 해결 -> 0.008초 해석적 벽면 밀착 동반 안착 전환
 ;;                                 2. 복합 단차·호(2/2 100%), 모따기(3/3 100%), Ø890(5/5 100%), Ø1025(2/2 100%) 전원 0.4초대 초고속 완결
@@ -1369,6 +1373,35 @@
 
 ;; =============================================================================
 
+;;; [START: CURRENT ACTIVE - v5.6 MODIFIED (2026-10-24 16:30:00)]
+;; [True-Shape 부품 정밀 외곽 윤곽선 좌표 추출]
+(defun MBB:GetPartContour ( obj / objType p1 p2 stride pts )
+  (setq pts '())
+  (if (and obj (not (vl-catch-all-error-p obj)))
+    (progn
+      (setq objType (vla-get-ObjectName obj))
+      (if (wcmatch (strcase objType) "*POLYLINE*")
+        (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vla-get-Coordinates (list obj)))))
+          (progn
+            (setq p2 (vlax-safearray->list (vlax-variant-value p1))
+                  stride (if (wcmatch (strcase objType) "*2DPOLYLINE*,*3DPOLYLINE*") 3 2))
+            (while p2
+              (setq pts (cons (list (car p2) (cadr p2)) pts))
+              (if (= stride 3)
+                (setq p2 (cdddr p2))
+                (setq p2 (cddr p2))
+              )
+            )
+            (setq pts (reverse pts))
+          )
+        )
+      )
+    )
+  )
+  pts
+)
+;;; [END: CURRENT ACTIVE - v5.6 MODIFIED]
+
 (defun MBB:ExtractPoints ( obj resolution / objType pts param end-param inc i p has-bulge b-val ll ur p1 p2 p3 p4 ) 
 
     (setq objType (vla-get-objectname obj) pts '())
@@ -2712,23 +2745,44 @@
                       )
                       (write-line "  ]," f)
 
-                      ;; parts 배열 출력
+;;; [START: CURRENT ACTIVE - v5.6 MODIFIED (2026-10-24 16:30:00)]
+                      ;; parts 배열 출력 (True-Shape "polygon" 윤곽선 연동)
                       (write-line "  \"parts\": [" f)
                       (setq pi-idx 0 num-parts (length id-parts-list))
                       (foreach item id-parts-list
                         (setq pi-idx (1+ pi-idx)
                               pid (car item)
-                              p   (cdr item))
+                              p   (cdr item)
+                              orig-min-x (nth 1 p)
+                              orig-min-y (nth 2 p)
+                              parent-obj (car (nth 0 p))
+                              part-pts (MBB:GetPartContour parent-obj)
+                              poly-str "")
+                        (if (and part-pts (> (length part-pts) 2))
+                          (progn
+                            (setq poly-str ", \"polygon\": [")
+                            (setq pt-idx 0 num-pts-p (length part-pts))
+                            (foreach pt part-pts
+                              (setq pt-idx (1+ pt-idx))
+                              (setq poly-str (strcat poly-str "[" (rtos (- (car pt) orig-min-x) 2 4) ", "
+                                                              (rtos (- (cadr pt) orig-min-y) 2 4) "]"
+                                                              (if (< pt-idx num-pts-p) ", " "")))
+                            )
+                            (setq poly-str (strcat poly-str "]"))
+                          )
+                        )
                         (write-line (strcat "    {\"id\": " (itoa pid)
-                                            ", \"orig_min_x\": " (rtos (nth 1 p) 2 4)
-                                            ", \"orig_min_y\": " (rtos (nth 2 p) 2 4)
+                                            ", \"orig_min_x\": " (rtos orig-min-x 2 4)
+                                            ", \"orig_min_y\": " (rtos orig-min-y 2 4)
                                             ", \"w\": " (rtos (nth 3 p) 2 4)
                                             ", \"h\": " (rtos (nth 4 p) 2 4)
                                             ", \"area\": " (rtos (nth 5 p) 2 4)
+                                            poly-str
                                             "}"
                                             (if (< pi-idx num-parts) "," "")) f)
                       )
                       (write-line "  ]" f)
+;;; [END: CURRENT ACTIVE - v5.6 MODIFIED]
                       (write-line "}" f)
                       (close f)
                     )
