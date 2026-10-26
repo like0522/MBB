@@ -2970,7 +2970,7 @@
 
                   ;; 임시 배치 파일 및 입력 JSON 정리
                   (if (findfile bat-path) (vl-file-delete bat-path))
-                  (if (findfile json-in) (vl-file-delete json-in))
+                  ;;; [DEBUG DISABLED] (if (findfile json-in) (vl-file-delete json-in))
 
                   ;; 2. Python 결과 로드 및 CAD 객체(모형+문자) 일괄 자동 배치
                   (setq MBB_NESTING_PLAN nil

@@ -1571,6 +1571,14 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
     """
     with open(json_in_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
+    
+    # [v5.11 DEBUG] Save JSON input copy for diagnosis
+    try:
+        import shutil
+        _dbg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DEBUG_nesting_input.json')
+        shutil.copy2(json_in_path, _dbg_path)
+    except Exception:
+        pass
 
     if 'mode' in data and data['mode'] in ['fast', 'deep']:
         mode = data['mode']
@@ -1582,6 +1590,19 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     total_part_area = sum(p['w'] * p['h'] for p in parts_data)
     total_container_area = sum(c['area'] for c in containers_data)
+
+    # [v5.11 DEBUG] Print container and part details
+    for _c in containers_data:
+        _op = _c.get('outer_polygon', [])
+        print(f"   >> [DEBUG] Container {_c.get('id')}: type={_c.get('type')}, outer_polygon={len(_op)} pts, area={_c.get('area')}", flush=True)
+    for _p in parts_data:
+        _pp = _p.get('polygon', [])
+        _pa = _p['w'] * _p['h']
+        if _pp and len(_pp) >= 3:
+            _n = len(_pp)
+            _s = sum(_pp[_i][0]*_pp[(_i+1)%_n][1] - _pp[(_i+1)%_n][0]*_pp[_i][1] for _i in range(_n))
+            _pa = abs(_s)*0.5
+        print(f"   >> [DEBUG] Part {_p.get('id')}: w={_p.get('w')}, h={_p.get('h')}, polygon={len(_pp)} pts, actual_area={_pa:.0f}, cid={_p.get('container_id')}", flush=True)
 
     # [v5.8] 사각 박스 / 구역별 1:1 독립 초고속 네스팅 엔진
     # 컨테이너가 복수이거나 구역별 매칭이 필요한 경우 1:1 독립 네스팅 루프로 0.3초 완결
@@ -1601,7 +1622,13 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
         for u in list(unplaced_parts):
             for cid, cnt in c_map.items():
-                if cnt.area - cnt.placed_area >= u['w'] * u['h']:
+                # [v5.11 FIX] Use actual polygon area for rescue check
+                _u_area = u['w'] * u['h']
+                if 'polygon' in u and len(u.get('polygon',[])) >= 3:
+                    _up = u['polygon']
+                    _usa = sum(_up[_i][0]*_up[(_i+1)%len(_up)][1] - _up[(_i+1)%len(_up)][0]*_up[_i][1] for _i in range(len(_up)))
+                    _u_area = max(abs(_usa)*0.5, 1.0)
+                if cnt.area - cnt.placed_area >= _u_area:
                     if rescue_unplaced_in_container(cnt, u, gap=gap):
                         unplaced_parts.remove(u)
                         break
