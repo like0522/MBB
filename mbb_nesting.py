@@ -1570,7 +1570,13 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
     Main Orchestrator for MBBN Nesting Engine.
     """
     with open(json_in_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+        raw_json = f.read()
+    # [v5.11 FIX] AutoCAD rtos outputs '.xxxx' for numbers < 1 (no leading zero)
+    # This is invalid JSON. Fix: replace ', .' with ', 0.' and '[.' with '[0.'
+    import re
+    # Simple string replacements for AutoCAD rtos leading-zero fix
+    raw_json = raw_json.replace(', .', ', 0.').replace('[.', '[0.').replace('-.', '-0.')
+    data = json.loads(raw_json)
     
     # [v5.11 DEBUG] Save JSON input copy for diagnosis
     try:
