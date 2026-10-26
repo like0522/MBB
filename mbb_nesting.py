@@ -11,7 +11,7 @@ if sys.platform == 'win32':
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-26 23:14:15
+;;; LAST MODIFIED: 2026-10-26 23:32:11
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
 ;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
@@ -1333,6 +1333,72 @@ def detect_notch_subcavities(placed_plan, parts_data, container_data, gap=5.0, m
     return subcavities
 
 
+
+def _gravity_compact(plan, cnt, parts_data, gap, margin):
+    """
+    [v5.14] Gravity Compaction Post-Processing.
+    Slides every placed part as far DOWN (toward container min_oy) as possible
+    without violating collision or boundary constraints.
+    Processes parts bottom-up so each part settles onto already-finalized positions.
+    """
+    if not plan or len(plan) < 2:
+        return plan
+
+    # Skip gravity for circular containers (parts must stay inside circle boundary)
+    if cnt.get('type') == 'circle':
+        return plan
+
+    cnt_bbox = cnt.get('outer_bbox', [0, 0, 0, 0])
+    min_oy = cnt_bbox[1] + margin
+    max_oy = cnt_bbox[3] - margin
+
+    # Sort by gy ascending (bottommost parts first — they settle first)
+    plan.sort(key=lambda e: e['gy'])
+
+    moved_count = 0
+    for i in range(len(plan)):
+        entry = plan[i]
+        gx, w, h = entry['gx'], entry['w'], entry['h']
+        old_gy = entry['gy']
+
+        # Floor = container bottom + margin
+        lowest_gy = min_oy
+
+        # Check constraints from all other parts
+        for j in range(len(plan)):
+            if i == j:
+                continue
+            other = plan[j]
+            ox, ow, oh = other['gx'], other['w'], other['h']
+
+            # Fast horizontal overlap check (with gap)
+            if gx >= ox + ow + gap or gx + w + gap <= ox:
+                continue  # no horizontal overlap — does not block
+
+            # Only consider parts whose TOP edge is BELOW current part's bottom edge
+            # (i.e., parts that are physically underneath the current part)
+            other_top = other['gy'] + oh
+            if other_top > old_gy + 0.5:
+                continue  # this part is above or overlapping — not a floor constraint
+
+            # This part acts as a floor: current part must sit above it + gap
+            constraint = other_top + gap
+            lowest_gy = max(lowest_gy, constraint)
+
+        # Apply gravity: only move DOWN, never up
+        if lowest_gy < old_gy - 0.1:
+            # Verify the part still fits within container vertically
+            if lowest_gy + h <= max_oy + 0.1:
+                entry['gy'] = lowest_gy
+                moved_count += 1
+
+    if moved_count > 0:
+        print(f"   >> [v5.14 Gravity] {moved_count} part(s) compacted downward", flush=True)
+
+    return plan
+
+
+
 def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     """
     [v5.9] Solves nesting for a single container with Notch-First Sub-Cavity strategy.
@@ -1372,17 +1438,25 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         # [v5.13] If notch-first didn't place all parts, also try standard path
         # and pick whichever placed more parts
         if len(notch_result) >= len(c_parts):
-            return notch_result
-        std_result = _solve_standard_nesting(cnt, c_parts, gap, margin)
-        if len(std_result) > len(notch_result):
-            print(f"   >> [v5.13] Standard path ({len(std_result)}/{len(c_parts)}) beat Notch-First ({len(notch_result)}/{len(c_parts)})", flush=True)
-            return std_result
-        return notch_result
+            result = notch_result
+        else:
+            std_result = _solve_standard_nesting(cnt, c_parts, gap, margin)
+            if len(std_result) > len(notch_result):
+                print(f"   >> [v5.13] Standard path ({len(std_result)}/{len(c_parts)}) beat Notch-First ({len(notch_result)}/{len(c_parts)})", flush=True)
+                result = std_result
+            else:
+                result = notch_result
+    else:
+        # ========================================================================
+        # Standard path (no concave giants): Original v5.8 algorithm
+        # ========================================================================
+        result = _solve_standard_nesting(cnt, c_parts, gap, margin)
     
     # ========================================================================
-    # Standard path (no concave giants): Original v5.8 algorithm
+    # [v5.14] Gravity Compaction: settle all parts toward container bottom
     # ========================================================================
-    return _solve_standard_nesting(cnt, c_parts, gap, margin)
+    result = _gravity_compact(result, cnt, c_parts, gap, margin)
+    return result
 
 
 def _solve_standard_nesting(cnt, c_parts, gap=5.0, margin=1.0):
