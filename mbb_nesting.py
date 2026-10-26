@@ -1117,39 +1117,62 @@ def post_verify_and_relax(plan, containers_data, parts_data=None, gap=5.0, margi
         if not cnt.is_inside(gx, gy, w, h, part_poly=p_poly):
             continue
 
-        # 2. Check pairwise collision against all already placed parts in this container
+        # 2. [v5.12] Pairwise collision with concave polygon support
         collides = False
         notch_parent = it.get('_notch_parent_id')
+        gap_half = gap * 0.5
         for p in cnt.placed:
-            if not (gx + w + gap <= p['gx'] + 1e-4 or
-                    gx >= p['gx'] + p['w'] + gap - 1e-4 or
-                    gy + h + gap <= p['gy'] + 1e-4 or
-                    gy >= p['gy'] + p['h'] + gap - 1e-4):
-                # AABB overlap detected - check if this is a notch child vs its parent
-                if notch_parent is not None and p['id'] == notch_parent and HAS_SHAPELY:
-                    # Use Shapely polygon intersection for precise check
-                    parent_data = parts_map.get(p['id'])
-                    parent_poly = get_transformed_poly(parent_data, p['gx'], p['gy'], p.get('rot', 0))
-                    if parent_poly is not None:
-                        child_box = box(gx + gap * 0.5, gy + gap * 0.5, gx + w - gap * 0.5, gy + h - gap * 0.5)
-                        if not parent_poly.intersects(child_box):
-                            continue  # No real collision - part is in the notch!
-                        # Check with buffer for gap
-                        parent_buffered = parent_poly.buffer(gap * 0.8)
-                        child_rect = box(gx, gy, gx + w, gy + h)
-                        if not parent_buffered.intersects(child_rect):
-                            continue
-                # Also check if the other part is a notch child of this part
-                elif p.get('_notch_parent_id') is not None and p['_notch_parent_id'] == it.get('id') and HAS_SHAPELY:
-                    this_data = parts_map.get(it['id'])
-                    this_poly = get_transformed_poly(this_data, gx, gy, rot)
-                    if this_poly is not None:
-                        other_box = box(p['gx'] + gap * 0.5, p['gy'] + gap * 0.5, 
-                                       p['gx'] + p['w'] - gap * 0.5, p['gy'] + p['h'] - gap * 0.5)
-                        if not this_poly.intersects(other_box):
-                            continue
-                collides = True
-                break
+            # Quick BBOX separating-axis test
+            if (gx + w + gap <= p['gx'] + 1e-4 or
+                gx >= p['gx'] + p['w'] + gap - 1e-4 or
+                gy + h + gap <= p['gy'] + 1e-4 or
+                gy >= p['gy'] + p['h'] + gap - 1e-4):
+                continue  # Clearly separated
+
+            # BBOX overlap — check polygon intersection
+            skip = False
+
+            # Case A: Notch parent-child
+            if notch_parent is not None and p['id'] == notch_parent and HAS_SHAPELY:
+                parent_data = parts_map.get(p['id'])
+                parent_poly = get_transformed_poly(parent_data, p['gx'], p['gy'], p.get('rot', 0))
+                if parent_poly is not None:
+                    child_box = box(gx + gap_half, gy + gap_half, gx + w - gap_half, gy + h - gap_half)
+                    if not parent_poly.intersects(child_box):
+                        skip = True
+                    elif not parent_poly.buffer(gap * 0.8).intersects(box(gx, gy, gx + w, gy + h)):
+                        skip = True
+
+            # Case B: Reverse notch
+            elif p.get('_notch_parent_id') is not None and p['_notch_parent_id'] == it.get('id') and HAS_SHAPELY:
+                this_data = parts_map.get(it['id'])
+                this_poly = get_transformed_poly(this_data, gx, gy, rot)
+                if this_poly is not None:
+                    other_box = box(p['gx'] + gap_half, p['gy'] + gap_half,
+                                   p['gx'] + p['w'] - gap_half, p['gy'] + p['h'] - gap_half)
+                    if not this_poly.intersects(other_box):
+                        skip = True
+
+            # Case C: [v5.12] Concave part — polygon collision check
+            if not skip and HAS_SHAPELY:
+                # Check placed part concavity
+                p_placed_data = parts_map.get(p.get('id'))
+                p_placed_poly = get_transformed_poly(p_placed_data, p['gx'], p['gy'], p.get('rot', 0)) if p_placed_data else None
+                new_geom = p_poly if p_poly is not None else box(gx, gy, gx + w, gy + h)
+                if p_placed_poly is not None and p_placed_poly.area < p['w'] * p['h'] * 0.85:
+                    if not p_placed_poly.buffer(gap_half, join_style=2).intersects(new_geom.buffer(gap_half, join_style=2)):
+                        skip = True
+                # Check new part concavity
+                if not skip and p_poly is not None and p_poly.area < w * h * 0.85:
+                    p_box = box(p['gx'], p['gy'], p['gx'] + p['w'], p['gy'] + p['h'])
+                    if not p_poly.buffer(gap_half, join_style=2).intersects(p_box.buffer(gap_half, join_style=2)):
+                        skip = True
+
+            if skip:
+                continue
+            collides = True
+            break
+
 
         if not collides:
             entry = dict(it)
