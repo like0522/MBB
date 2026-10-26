@@ -11,7 +11,7 @@ if sys.platform == 'win32':
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-26 20:06:00
+;;; LAST MODIFIED: 2026-10-26 20:48:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
 ;;; - v5.9 (2026-10-26 20:06:00) : L-in-L 오목 단품 노치 서브캐비티 자동 분할 배치 엔진 탑재
@@ -23,6 +23,7 @@ if sys.platform == 'win32':
 ;;;                                 3. AABB 충돌 판정 수정 없이 서브컨테이너 분리 방식으로 안전하게 노치 내부 배치 달성
 
 ;;;                                 4. 기존 12-group 29/29 100% 수율 완전 호환 (회귀 테스트 통과)
+;;;                                 5. [v5.9d FIX] MBB.LSP area=w*h(BBOX면적) 전송 문제 대응: polygon 꼭짓점 Shoelace 공식으로 실제 면적 재계산
 
 ;;; - v5.8 (2026-10-26 08:15:00) : 사각 박스 / 구역별 1:1 독립 초고속 네스팅 엔진 (도면 추천 배열 100% 반영)
 ;;;                                 1. solve_grouped_nesting 함수 탑재: 컨테이너별 지정 단품만 1:1 독립 네스팅 루프
@@ -1181,7 +1182,16 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     for p in c_parts:
         if 'polygon' in p and len(p.get('polygon', [])) >= 4:
             bbox_area = p['w'] * p['h']
-            actual_area = p.get('area', bbox_area)
+            # [v5.9d FIX] Compute actual polygon area from vertices (Shoelace formula)
+            # because MBB.LSP exports area=w*h (BBOX area), not the true polygon area
+            poly_pts = p['polygon']
+            n_pts = len(poly_pts)
+            shoelace_area = 0.0
+            for _i in range(n_pts):
+                x1, y1 = poly_pts[_i]
+                x2, y2 = poly_pts[(_i + 1) % n_pts]
+                shoelace_area += x1 * y2 - x2 * y1
+            actual_area = abs(shoelace_area) * 0.5
             if bbox_area > 0 and (actual_area / bbox_area) < 0.95 and bbox_area >= 180000.0:
                 has_concave_giant = True
                 concave_parts.append(p)
