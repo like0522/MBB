@@ -11,9 +11,13 @@ if sys.platform == 'win32':
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-26 20:48:00
+;;; LAST MODIFIED: 2026-10-26 21:32:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
+;;;                                  1. clone_parts_for_empty_containers(): 빈 컨테이너에 유사 컨테이너의 단품 세트 자동 복제
+;;;                                  2. MBB.LSP vla-Copy 연동: clone_source_id 마커로 원본 객체 복사+이동
+;;;                                  3. 동일 형태 컨테이너 복수 배치 100% 지원 (EA 수량 무관)
 ;;; - v5.9 (2026-10-26 20:06:00) : L-in-L 오목 단품 노치 서브캐비티 자동 분할 배치 엔진 탑재
 
 ;;;                                 1. detect_notch_subcavities(): 배치된 오목(Concave) 대형 단품의 BBOX-폴리곤 차집합으로 빈 노치 영역 자동 추출
@@ -1461,11 +1465,58 @@ def solve_grouped_nesting(containers_data, parts_data, gap=5.0, margin=1.0, mode
     for p in parts_data:
         groups_map[p['container_id']].append(p)
 
+    # ========================================================================
+    # [v5.10] Empty Container Part Cloning System
+    # For containers with 0 assigned parts, clone parts from the most
+    # shape-similar container that HAS parts.
+    # ========================================================================
+    empty_cids = [c['id'] for c in containers_data if len(groups_map.get(c['id'], [])) == 0]
+    filled_cids = [c['id'] for c in containers_data if len(groups_map.get(c['id'], [])) > 0]
+
+    if empty_cids and filled_cids:
+        c_map_data = {c['id']: c for c in containers_data}
+        max_pid = max(p['id'] for p in parts_data) if parts_data else 0
+        clone_registry = {}  # new_pid -> source_pid mapping
+
+        for ecid in empty_cids:
+            ec = c_map_data[ecid]
+            ec_area = float(ec.get('area', 0))
+            ec_type = ec.get('type', 'polygon')
+
+            # Find the most similar filled container by area + type
+            best_donor_cid = None
+            best_sim = float('inf')
+            for fcid in filled_cids:
+                fc = c_map_data[fcid]
+                if fc.get('type', 'polygon') != ec_type:
+                    continue
+                fc_area = float(fc.get('area', 0))
+                if fc_area <= 0 or ec_area <= 0:
+                    continue
+                area_ratio = abs(fc_area - ec_area) / max(fc_area, ec_area)
+                if area_ratio < best_sim:
+                    best_sim = area_ratio
+                    best_donor_cid = fcid
+
+            if best_donor_cid is not None and best_sim < 0.10:  # Within 10% area similarity
+                donor_parts = groups_map[best_donor_cid]
+                cloned = []
+                for dp in donor_parts:
+                    max_pid += 1
+                    cp = dict(dp)
+                    cp['id'] = max_pid
+                    cp['container_id'] = ecid
+                    cp['_clone_source_id'] = dp['id']  # Link to original
+                    cloned.append(cp)
+                    clone_registry[max_pid] = dp['id']
+                groups_map[ecid] = cloned
+                print(f"   >> [v5.10 Clone] Container {ecid} <- {len(cloned)} parts cloned from Container {best_donor_cid} (area similarity {(1-best_sim)*100:.1f}%)", flush=True)
+
     final_plan = []
     unplaced_parts = []
 
     print("\n" + "=" * 70)
-    print(" [ MBBN v5.9 - L-in-L Concave Notch Sub-Cavity Nesting Engine ]")
+    print(" [ MBBN v5.10 - Empty Container Auto-Clone Nesting Engine ]")
     print("=" * 70)
     print(f">> Total {len(containers_data)} Containers x {len(parts_data)} Parts 1:1 Matching")
     print(f">> Rules: Boundary margin {margin:.1f}mm, Part gap {gap:.1f}mm")
@@ -1543,7 +1594,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
 
     final_export_plan = []
     for it in clean_plan:
-        final_export_plan.append({
+        entry = {
             'part_id': it['id'],
             'container_id': it['container_id'],
             'gx': it['gx'],
@@ -1551,7 +1602,10 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
             'w': it['w'],
             'h': it['h'],
             'rot': int(round(it.get('rot', 0)))
-        })
+        }
+        if '_clone_source_id' in it:
+            entry['clone_source_id'] = it['_clone_source_id']
+        final_export_plan.append(entry)
 
     fallback_plan = generate_unplaced_placement(unplaced_parts, containers_data, gap=15.0)
 
@@ -1571,7 +1625,8 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         f.write(f"(setq MBB_UNPLACED_COUNT {len(fallback_plan)})\n")
         f.write("(setq MBB_NESTING_PLAN '(\n")
         for it in final_export_plan:
-            f.write(f"  ({it['part_id']} {it['container_id']} {it['gx']:.4f} {it['gy']:.4f} {it['w']:.4f} {it['h']:.4f} {it['rot']})\n")
+            clone_src = it.get('clone_source_id', -1)
+            f.write(f"  ({it['part_id']} {it['container_id']} {it['gx']:.4f} {it['gy']:.4f} {it['w']:.4f} {it['h']:.4f} {it['rot']} {clone_src})\n")
         f.write("))\n")
         f.write("(setq MBB_UNPLACED_PLAN '(\n")
         for it in fallback_plan:

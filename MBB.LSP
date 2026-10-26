@@ -2388,6 +2388,7 @@
                   gap margin nest-mode mode-str
                   item geom rot orig-min-x orig-min-y orig-w orig-h
                   move-dx move-dy
+                   clone-src src-entry src-objs src-min-x src-min-y o-copy clone-dx clone-dy tmp-bmin2 tmp-bmax2
                   cur-dir temp-dir py-script json-in json-out lsp-out bat-path py-exe cmd wsh f f-bat
                   t-item t-obj t-min t-max t-cx t-cy
                   pi-idx num-pts num-parts id-parts-list pid part-entry
@@ -2919,7 +2920,8 @@
                               w   (nth 4 item)
                               h   (nth 5 item)
                               rot (nth 6 item)
-                              part-entry (assoc pid id-parts-list))
+                              part-entry (assoc pid id-parts-list)
+                              clone-src (if (>= (length item) 8) (nth 7 item) -1))
                         (if part-entry
                           (progn
                             (setq p (cdr part-entry)
@@ -2953,10 +2955,42 @@
                               (setq move-dx (- gx orig-min-x)
                                     move-dy (- gy orig-min-y))
                             )
-                            (foreach o all-objs
-                              (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
+;;; [START: CURRENT ACTIVE - v5.10 MODIFIED (2026-10-26 21:32:00)]
+                            ;; [v5.10] clone-src >= 0: 원본 객체 복사(Copy) 후 이동, clone-src < 0: 기존 이동(Move)
+                            (if (and clone-src (>= clone-src 0))
+                              (progn
+                                ;; 원본 단품 ID로 VLA 객체 목록 조회
+                                (setq src-entry (assoc clone-src id-parts-list))
+                                (if src-entry
+                                  (progn
+                                    (setq src-objs (nth 0 (cdr src-entry))
+                                          src-min-x (nth 1 (cdr src-entry))
+                                          src-min-y (nth 2 (cdr src-entry)))
+                                    ;; 원본 객체 → 복사 → 이동
+                                    (foreach o src-objs
+                                      (setq o-copy (vla-Copy o))
+                                      (if (or (= rot 90) (= rot 90.0))
+                                        (vl-catch-all-apply 'vla-Rotate (list o-copy (vlax-3d-point (list src-min-x src-min-y 0.0)) (/ pi 2.0)))
+                                      )
+                                      ;; 복사본 BBOX 기준으로 이동
+                                      (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-GetBoundingBox (list o-copy 'tmp-bmin2 'tmp-bmax2))))
+                                        (progn
+                                          (setq tmp-bmin2 (vlax-safearray->list tmp-bmin2))
+                                          (setq clone-dx (- gx (car tmp-bmin2))
+                                                clone-dy (- gy (cadr tmp-bmin2)))
+                                          (vl-catch-all-apply 'vla-Move (list o-copy (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list clone-dx clone-dy 0.0))))
+                                        )
+                                      )
+                                    )
+                                  )
+                                )
+                              )
+                              ;; 기존 이동 로직 (원본 단품)
+                              (foreach o all-objs
+                                (vl-catch-all-apply 'vla-Move (list o (vlax-3d-point '(0.0 0.0 0.0)) (vlax-3d-point (list move-dx move-dy 0.0))))
+                              )
                             )
-;;; [END: CURRENT ACTIVE - v4.9 MODIFIED]
+;;; [END: CURRENT ACTIVE - v5.10 MODIFIED]
                           )
                         )
                       )
