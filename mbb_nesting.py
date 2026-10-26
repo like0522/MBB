@@ -11,7 +11,7 @@ if sys.platform == 'win32':
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-26 23:32:11
+;;; LAST MODIFIED: 2026-10-27 00:04:15
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
 ;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
@@ -927,8 +927,16 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
 
     placed_count = len(placed_plan)
     total_area = sum(it['area'] for it in placed_plan)
-    # Area-Dominated Fitness Score
-    score = total_area * 100.0 + placed_count * 10.0
+    # [v5.16] Hierarchical Fitness Score:
+    # Tier 1: Placed count is ABSOLUTELY primary (1 billion points per part)
+    # Tier 2: Total area placed (1 point per mm2)
+    # Tier 3: Strip height penalty (lower max Y = flatter horizontal cutting line)
+    score = placed_count * 1000000000.0 + total_area
+    if placed_count == len(parts_order) and placed_plan:
+        max_top = max(it['gy'] + it['h'] for it in placed_plan)
+        min_base = min((c.get('outer_bbox', [0, 0, 0, 0])[1] if 'outer_bbox' in c else c.get('center', [0, 0])[1] - c.get('radius', 0.0)) for c in containers_data)
+        strip_h = max_top - min_base
+        score -= strip_h * 1000.0
 
     return {
         'score': score,
@@ -1399,6 +1407,280 @@ def _gravity_compact(plan, cnt, parts_data, gap, margin):
 
 
 
+
+def _compact_minimize_height(plan, cnt, parts_data, gap, margin):
+    """
+    [v5.16] Advanced Strip Height & Cavity Compaction Engine.
+    "사각을 줄여가면서 압축하면서 최대한 꾹꾹 누르면서 배열"
+    
+    1. Single-part X-shift & Gravity Drop with 0/90 rotation
+    2. Pairwise Horizontal Swap: swaps horizontal columns of two parts to unlock
+       deep lower cavities (e.g. dropping floating parts into 150mm gaps)
+    3. Center-of-Gravity minimization to eliminate internal dead-air gaps
+    """
+    if not plan or len(plan) < 2 or cnt.get('type') == 'circle':
+        return plan
+
+    cnt_bbox = cnt.get('outer_bbox', [0, 0, 0, 0])
+    min_ox = cnt_bbox[0] + margin
+    min_oy = cnt_bbox[1] + margin
+    max_ox = cnt_bbox[2] - margin
+    max_oy = cnt_bbox[3] - margin
+    c_width = max_ox - min_ox
+    c_height = max_oy - min_oy
+
+    def get_strip_h(p_list):
+        return max(e['gy'] + e['h'] for e in p_list) - min_oy
+
+    def get_cog_y(p_list):
+        return sum((e['gy'] - min_oy + e['h'] * 0.5) * (e['w'] * e['h']) for e in p_list)
+
+    def lowest_y_at(idx, gx, w, h, p_list):
+        ly = min_oy
+        for j in range(len(p_list)):
+            if j == idx:
+                continue
+            o = p_list[j]
+            if gx < o['gx'] + o['w'] + gap - 0.01 and gx + w + gap - 0.01 > o['gx']:
+                ly = max(ly, o['gy'] + o['h'] + gap)
+        return ly
+
+    def check_valid_plan(p_list):
+        n = len(p_list)
+        for i in range(n):
+            e = p_list[i]
+            if e['gx'] < min_ox - 0.05 or e['gx'] + e['w'] > max_ox + 0.05:
+                return False
+            if e['gy'] < min_oy - 0.05 or e['gy'] + e['h'] > max_oy + 0.05:
+                return False
+            for j in range(i + 1, n):
+                o = p_list[j]
+                if not (e['gx'] + e['w'] + gap <= o['gx'] + 0.05 or
+                        o['gx'] + o['w'] + gap <= e['gx'] + 0.05 or
+                        e['gy'] + e['h'] + gap <= o['gy'] + 0.05 or
+                        o['gy'] + o['h'] + gap <= e['gy'] + 0.05):
+                    return False
+        return True
+
+    initial_h = get_strip_h(plan)
+    initial_cog = get_cog_y(plan)
+    total_moves = 0
+
+    # Phase 1: Iterative Single-Part Slide, Rotate & Drop
+    for iteration in range(30):
+        improved = False
+        # Sort parts by top Y descending (highest parts first)
+        order = sorted(range(len(plan)), key=lambda idx: plan[idx]['gy'] + plan[idx]['h'], reverse=True)
+
+        for i in order:
+            entry = plan[i]
+            save_gx, save_gy = entry['gx'], entry['gy']
+            save_w, save_h = entry['w'], entry['h']
+            save_rot = entry.get('rot', 0)
+
+            orientations = [(save_w, save_h, save_rot)]
+            if abs(save_w - save_h) > 1.0:
+                alt_rot = (save_rot + 90) % 360
+                orientations.append((save_h, save_w, alt_rot))
+
+            best_move = None
+            cur_h = get_strip_h(plan)
+            cur_cog = get_cog_y(plan)
+            best_h = cur_h
+            best_cog = cur_cog
+
+            for tw, th, trot in orientations:
+                if tw > c_width + 0.05 or th > c_height + 0.05:
+                    continue
+
+                x_cands = set()
+                x_cands.add(min_ox)
+                x_cands.add(max_ox - tw)
+                for j in range(len(plan)):
+                    if j == i:
+                        continue
+                    o = plan[j]
+                    x_cands.add(o['gx'] + o['w'] + gap)
+                    x_cands.add(o['gx'] - tw - gap)
+                    x_cands.add(o['gx'])
+                    x_cands.add(o['gx'] + o['w'] - tw)
+
+                # Add fine grid
+                grid_step = max(50.0, c_width / 40.0)
+                n_grid = int(c_width / grid_step)
+                for gi in range(n_grid + 1):
+                    x_cands.add(min_ox + gi * grid_step)
+
+                for gx in x_cands:
+                    gx = round(gx, 2)
+                    if gx < min_ox - 0.01 or gx + tw > max_ox + 0.01:
+                        continue
+
+                    gy = lowest_y_at(i, gx, tw, th, plan)
+                    if gy + th > max_oy + 0.01:
+                        continue
+
+                    entry['gx'], entry['gy'], entry['w'], entry['h'] = gx, gy, tw, th
+                    new_h = get_strip_h(plan)
+                    new_cog = get_cog_y(plan)
+                    entry['gx'], entry['gy'], entry['w'], entry['h'] = save_gx, save_gy, save_w, save_h
+
+                    # Prefer lower strip height, or significantly lower COG at same/better height
+                    if new_h < best_h - 1.0 or (new_h <= best_h + 0.5 and new_cog < best_cog - 50000.0):
+                        best_h = new_h
+                        best_cog = new_cog
+                        best_move = (gx, gy, tw, th, trot)
+
+            if best_move and (best_h < cur_h - 1.0 or (best_h <= cur_h + 0.5 and best_cog < cur_cog - 50000.0)):
+                entry['gx'], entry['gy'] = best_move[0], best_move[1]
+                entry['w'], entry['h'] = best_move[2], best_move[3]
+                entry['rot'] = best_move[4]
+                improved = True
+                total_moves += 1
+
+        if not improved:
+            break
+
+    # Phase 2: Pairwise Horizontal Swap Optimization
+    # If two parts A and B are swapped in X columns, can one drop into a deep cavity?
+    n_parts = len(plan)
+    for p_iter in range(10):
+        swap_improved = False
+        for i in range(n_parts):
+            for j in range(i + 1, n_parts):
+                e1 = plan[i]
+                e2 = plan[j]
+
+                # Don't swap if they horizontally overlap heavily
+                if not (e1['gx'] + e1['w'] <= e2['gx'] or e2['gx'] + e2['w'] <= e1['gx']):
+                    continue
+
+                cur_h = get_strip_h(plan)
+                cur_cog = get_cog_y(plan)
+
+                # Try swapping X positions
+                s1_gx, s1_gy = e1['gx'], e1['gy']
+                s2_gx, s2_gy = e2['gx'], e2['gy']
+
+                # Try direct swap
+                new_e1_gx = s2_gx
+                new_e2_gx = s1_gx
+
+                # Check bounds
+                if new_e1_gx + e1['w'] > max_ox + 0.01 or new_e2_gx + e2['w'] > max_ox + 0.01:
+                    continue
+
+                # Drop both to lowest valid Y
+                e1['gx'], e1['gy'] = new_e1_gx, min_oy
+                e2['gx'], e2['gy'] = new_e2_gx, min_oy
+
+                e1['gy'] = lowest_y_at(i, new_e1_gx, e1['w'], e1['h'], plan)
+                e2['gy'] = lowest_y_at(j, new_e2_gx, e2['w'], e2['h'], plan)
+
+                if check_valid_plan(plan):
+                    new_h = get_strip_h(plan)
+                    new_cog = get_cog_y(plan)
+                    if new_h < cur_h - 1.0 or (new_h <= cur_h + 0.5 and new_cog < cur_cog - 50000.0):
+                        swap_improved = True
+                        total_moves += 1
+                        continue
+
+                # Revert
+                e1['gx'], e1['gy'] = s1_gx, s1_gy
+                e2['gx'], e2['gy'] = s2_gx, s2_gy
+
+        if not swap_improved:
+            break
+
+    # Phase 3: Final Gravity Settle
+    plan.sort(key=lambda e: e['gy'])
+    for i in range(len(plan)):
+        entry = plan[i]
+        ly = lowest_y_at(i, entry['gx'], entry['w'], entry['h'], plan)
+        if ly < entry['gy'] - 0.1:
+            entry['gy'] = ly
+
+    final_h = get_strip_h(plan)
+    final_cog = get_cog_y(plan)
+    saved_h = initial_h - final_h
+    if saved_h > 0.5 or final_cog < initial_cog - 10000.0:
+        print(f"   >> [v5.16 Compact Press] Strip height: {initial_h:.0f} -> {final_h:.0f}mm (saved {saved_h:.0f}mm) [{total_moves} moves]", flush=True)
+
+    return plan
+def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, max_iters=5):
+    """
+    [v5.16] Iterative Shrink-Press Optimization.
+    "사각을 줄여가면서 압축하면서 최대한 꾹꾹 누르면서 배열"
+    After an initial valid placement is found, iteratively lowers the virtual
+    ceiling (container max_y) step by step, forcing parts to pack into a tighter,
+    lower rectangle until physical packing limits are reached.
+    """
+    if cnt.get('type') == 'circle' or len(c_parts) <= 1:
+        return _solve_standard_nesting(cnt, c_parts, gap, margin)
+
+    cnt_bbox = cnt.get('outer_bbox', [0, 0, 0, 0])
+    min_ox = cnt_bbox[0] + margin
+    min_oy = cnt_bbox[1] + margin
+    max_ox = cnt_bbox[2] - margin
+    max_oy = cnt_bbox[3] - margin
+    c_w = max_ox - min_ox
+    c_h = max_oy - min_oy
+
+    # Initial solution
+    best_plan = _solve_standard_nesting(cnt, c_parts, gap, margin)
+    if len(best_plan) < len(c_parts):
+        return best_plan
+
+    initial_top_y = max(e['gy'] + e['h'] for e in best_plan)
+    initial_strip_h = initial_top_y - min_oy
+    best_strip_h = initial_strip_h
+
+    # Theoretical minimum height based on sum of part areas
+    total_area = sum(_calc_polygon_area(p) for p in c_parts)
+    theoretical_min_h = total_area / max(1.0, c_w)
+
+    step = 50.0  # start shrinking by 50mm
+    target_h = best_strip_h - step
+    press_count = 0
+
+    for _ in range(max_iters):
+        if target_h <= theoretical_min_h * 0.98 or step < 10.0:
+            break
+
+        # Create shrunk virtual container
+        shrunk_cnt = dict(cnt)
+        shrunk_cnt['outer_bbox'] = [cnt_bbox[0], cnt_bbox[1], cnt_bbox[2], min_oy + target_h]
+        if 'outer_polygon' in cnt:
+            shrunk_cnt['outer_polygon'] = [
+                [cnt_bbox[0], cnt_bbox[1]],
+                [cnt_bbox[2], cnt_bbox[1]],
+                [cnt_bbox[2], min_oy + target_h],
+                [cnt_bbox[0], min_oy + target_h]
+            ]
+        shrunk_cnt['area'] = c_w * target_h
+
+        trial_plan = _solve_standard_nesting(shrunk_cnt, c_parts, gap, margin)
+
+        if len(trial_plan) == len(c_parts):
+            # Success: fits in tighter container!
+            trial_top = max(e['gy'] + e['h'] for e in trial_plan)
+            trial_h = trial_top - min_oy
+            best_plan = trial_plan
+            best_strip_h = trial_h
+            press_count += 1
+            target_h = best_strip_h - step
+        else:
+            # Failed: ceiling too low, halve step
+            step *= 0.5
+            target_h = best_strip_h - step
+
+    if press_count > 0:
+        saved = initial_strip_h - best_strip_h
+        print(f"   >> [v5.16 Shrink-Press] Pressed {press_count}x: strip height {initial_strip_h:.0f} -> {best_strip_h:.0f}mm (saved {saved:.0f}mm)", flush=True)
+
+    return best_plan
+
+
 def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     """
     [v5.9] Solves nesting for a single container with Notch-First Sub-Cavity strategy.
@@ -1440,7 +1722,7 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         if len(notch_result) >= len(c_parts):
             result = notch_result
         else:
-            std_result = _solve_standard_nesting(cnt, c_parts, gap, margin)
+            std_result = _shrink_press_loop(cnt, c_parts, gap, margin)
             if len(std_result) > len(notch_result):
                 print(f"   >> [v5.13] Standard path ({len(std_result)}/{len(c_parts)}) beat Notch-First ({len(notch_result)}/{len(c_parts)})", flush=True)
                 result = std_result
@@ -1450,12 +1732,19 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         # ========================================================================
         # Standard path (no concave giants): Original v5.8 algorithm
         # ========================================================================
-        result = _solve_standard_nesting(cnt, c_parts, gap, margin)
+        result = _shrink_press_loop(cnt, c_parts, gap, margin)
     
     # ========================================================================
     # [v5.14] Gravity Compaction: settle all parts toward container bottom
     # ========================================================================
     result = _gravity_compact(result, cnt, c_parts, gap, margin)
+    
+    # ========================================================================
+    # [v5.15] Strip Height Minimization: iterative compact press
+    # Repositions parts (X shift + rotation) to minimize strip height
+    # so the top cutting line is as low/horizontal as possible
+    # ========================================================================
+    result = _compact_minimize_height(result, cnt, c_parts, gap, margin)
     return result
 
 
@@ -1465,26 +1754,39 @@ def _solve_standard_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     p_area = sorted(c_parts, key=lambda p: (p['w'] * p['h']), reverse=True)
     c_ids = [cnt['id']]
 
+    # [v5.16] Multi-Seed Diversity: bigness, area, height, width, aspect ratio
+    p_height = sorted(c_parts, key=lambda p: max(p['w'], p['h']), reverse=True)
+    p_width = sorted(c_parts, key=lambda p: min(p['w'], p['h']), reverse=True)
+    p_aspect = sorted(c_parts, key=lambda p: max(p['w'], p['h']) / max(1.0, min(p['w'], p['h'])), reverse=True)
+
+    rot_free = {p['id']: [0, 90] for p in c_parts}
+    rot_horiz = {p['id']: [0 if p['w'] >= p['h'] else 90] for p in c_parts}
+    rot_vert = {p['id']: [90 if p['w'] >= p['h'] else 0] for p in c_parts}
+
     seed_configs = [
-        (p_bigness, c_ids, True),
-        (p_bigness, c_ids, False),
-        (p_area, c_ids, True),
-        (p_area, c_ids, False)
+        (p_bigness, c_ids, True, rot_free),
+        (p_bigness, c_ids, False, rot_free),
+        (p_area, c_ids, True, rot_free),
+        (p_area, c_ids, False, rot_free),
+        (p_height, c_ids, False, rot_free),
+        (p_width, c_ids, True, rot_horiz),
+        (p_aspect, c_ids, False, rot_free),
+        (p_area, c_ids, False, rot_horiz),
+        (p_bigness, c_ids, False, rot_vert)
     ]
 
     best_result = None
-    for p_ord, c_ord, strip in seed_configs:
+    for p_ord, c_ord, strip, rots in seed_configs:
         genome = {
             'parts_order': list(p_ord),
             'c_order': list(c_ord),
             'use_strip': strip,
-            'rot_prefs': {p['id']: [0, 90] for p in c_parts}
+            'rot_prefs': rots
         }
         res = evaluate_individual_genome(genome, [cnt], gap=gap, margin=margin)
         if best_result is None or res['score'] > best_result['score']:
             best_result = res
-            if best_result['placed_count'] == len(c_parts):
-                break
+            # [v5.16] Do NOT early break! Continue searching for flatter/lower strip height
 
     clean_plan = post_verify_and_relax(best_result['plan'], [cnt], parts_data=c_parts, gap=gap, margin=margin)
     placed_pids = set(it['id'] for it in clean_plan)
