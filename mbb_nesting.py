@@ -14,10 +14,14 @@ if sys.platform == 'win32':
 ;;; LAST MODIFIED: 2026-10-26 21:32:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
-;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
-;;;                                  1. clone_parts_for_empty_containers(): 빈 컨테이너에 유사 컨테이너의 단품 세트 자동 복제
-;;;                                  2. MBB.LSP vla-Copy 연동: clone_source_id 마커로 원본 객체 복사+이동
-;;;                                  3. 동일 형태 컨테이너 복수 배치 100% 지원 (EA 수량 무관)
+;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
+
+;;;                                  1. clone_parts_for_empty_containers(): 빈 컨테이너에 유사 컨테이너의 단품 세트 자동 복제
+
+;;;                                  2. MBB.LSP vla-Copy 연동: clone_source_id 마커로 원본 객체 복사+이동
+
+;;;                                  3. 동일 형태 컨테이너 복수 배치 100% 지원 (EA 수량 무관)
+
 ;;; - v5.9 (2026-10-26 20:06:00) : L-in-L 오목 단품 노치 서브캐비티 자동 분할 배치 엔진 탑재
 
 ;;;                                 1. detect_notch_subcavities(): 배치된 오목(Concave) 대형 단품의 BBOX-폴리곤 차집합으로 빈 노치 영역 자동 추출
@@ -27,6 +31,7 @@ if sys.platform == 'win32':
 ;;;                                 3. AABB 충돌 판정 수정 없이 서브컨테이너 분리 방식으로 안전하게 노치 내부 배치 달성
 
 ;;;                                 4. 기존 12-group 29/29 100% 수율 완전 호환 (회귀 테스트 통과)
+;;;                                 6. [v5.11 FIX] find_best_position BBOX면적→polygon 실면적 필터 수정
 ;;;                                 5. [v5.9d FIX] MBB.LSP area=w*h(BBOX면적) 전송 문제 대응: polygon 꼭짓점 Shoelace 공식으로 실제 면적 재계산
 
 ;;; - v5.8 (2026-10-26 08:15:00) : 사각 박스 / 구역별 1:1 독립 초고속 네스팅 엔진 (도면 추천 배열 100% 반영)
@@ -296,7 +301,20 @@ class EvolutionContainer:
         Includes X-Shift biased candidates for circular scrap sheets to create cavities!
         """
         rem_area = self.area - self.placed_area
-        if pw * ph > rem_area:
+        # [v5.11 FIX] Use actual polygon area if available, not BBOX area
+        # D-shape/crescent parts have BBOX area >> actual polygon area
+        part_actual_area = pw * ph
+        if part_data and 'polygon' in part_data and len(part_data.get('polygon', [])) >= 3:
+            _pp = part_data['polygon']
+            _sa = 0.0
+            for _pi in range(len(_pp)):
+                _x1, _y1 = _pp[_pi]
+                _x2, _y2 = _pp[(_pi + 1) % len(_pp)]
+                _sa += _x1 * _y2 - _x2 * _y1
+            part_actual_area = abs(_sa) * 0.5
+            if part_actual_area < 1.0:
+                part_actual_area = pw * ph  # fallback
+        if part_actual_area > rem_area:
             return None
         if min(pw, ph) > (self.max_ox - self.min_ox) or min(pw, ph) > (self.max_oy - self.min_oy):
             return None
@@ -716,7 +734,10 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                         stack_entries = []
                         for bi in range(num_bars):
                             cy = start_y + bi * (cur_h + cnt.gap)
-                            if not cnt.can_place(start_x, cy, cur_w, cur_h):
+                            # [v5.11 FIX] Pass part polygon for non-rectangular containers
+                            _sp = parts_dict.get(avail_pids[bi])
+                            _sp_poly = get_transformed_poly(_sp, start_x, cy, rot) if _sp else None
+                            if not cnt.can_place(start_x, cy, cur_w, cur_h, part_poly=_sp_poly):
                                 all_fit = False
                                 break
                             stack_entries.append((avail_pids[bi], start_x, cy, cur_w, cur_h, float(rot)))
