@@ -262,14 +262,54 @@ class EvolutionContainer:
             return True
 
     def can_place(self, gx, gy, w, h, part_poly=None):
-        """Zero collision and full containment check."""
+        """Zero collision and full containment check with polygon-aware collision.
+        [v5.12] Uses Shapely polygon intersection only when a placed part has
+        significant concavity (area < 85% BBOX). Rectangular parts use fast BBOX check."""
+        gap = self.gap
+        gap_half = gap * 0.5
+
         for p in self.placed:
-            if not (gx + w + self.gap <= p['gx'] + 1e-4 or
-                    gx >= p['gx'] + p['w'] + self.gap - 1e-4 or
-                    gy + h + self.gap <= p['gy'] + 1e-4 or
-                    gy >= p['gy'] + p['h'] + self.gap - 1e-4):
-                return False
+            # Quick BBOX separating-axis test first (fast path)
+            if (gx + w + gap <= p['gx'] + 1e-4 or
+                gx >= p['gx'] + p['w'] + gap - 1e-4 or
+                gy + h + gap <= p['gy'] + 1e-4 or
+                gy >= p['gy'] + p['h'] + gap - 1e-4):
+                continue  # Clearly separated — no collision
+
+            # BBOX overlap detected.
+            # Only use polygon check if placed part is concave (has _concave flag)
+            if p.get('_concave') and HAS_SHAPELY:
+                p_poly = p.get('_shapely_poly')
+                if p_poly is not None:
+                    new_geom = part_poly if part_poly is not None else box(gx, gy, gx + w, gy + h)
+                    try:
+                        if not p_poly.buffer(gap_half, join_style=2).intersects(new_geom.buffer(gap_half, join_style=2)):
+                            continue  # Polygons don't intersect — placement OK
+                    except Exception:
+                        pass
+            return False  # BBOX collision, no polygon override
+
         return self.is_inside(gx, gy, w, h, part_poly=part_poly)
+
+    def _store_placed_poly(self, entry, part_data=None):
+        """[v5.12] Compute and store Shapely polygon + concavity flag for placed entry."""
+        if not HAS_SHAPELY:
+            return
+        if '_shapely_poly' in entry:
+            return  # Already computed
+        rot = entry.get('rot', 0)
+        p_poly = None
+        if part_data and 'polygon' in part_data:
+            p_poly = get_transformed_poly(part_data, entry['gx'], entry['gy'], rot)
+        if p_poly is not None and p_poly.is_valid and not p_poly.is_empty:
+            entry['_shapely_poly'] = p_poly
+            # Flag concave parts: actual area < 85% of BBOX area
+            bbox_area = entry['w'] * entry['h']
+            entry['_concave'] = (p_poly.area < bbox_area * 0.85) if bbox_area > 0 else False
+        else:
+            entry['_shapely_poly'] = box(entry['gx'], entry['gy'],
+                                         entry['gx'] + entry['w'], entry['gy'] + entry['h'])
+            entry['_concave'] = False
 
     def do_float(self, p_entry, part_data=None):
         """Micro-step gravity compaction without breaking containment."""
@@ -386,7 +426,9 @@ class EvolutionContainer:
                 cands.append((self.min_ox + self.margin, self.min_oy + self.margin))
                 cands.append((self.cx - cur_w * 0.5, self.min_oy + self.margin))
                 cands.append((self.max_ox - self.margin - cur_w, self.min_oy + self.margin))
-                scan_res = 8
+                # [v5.12] Adaptive scan resolution: higher when concave parts present
+                has_concave = any(p.get('_concave') for p in self.placed)
+                scan_res = 16 if has_concave else 8
                 step_x = (self.max_ox - self.min_ox - cur_w) / max(1, scan_res)
                 step_y = (self.max_oy - self.min_oy - cur_h) / max(1, scan_res)
                 for sy in range(scan_res + 1):
@@ -397,6 +439,7 @@ class EvolutionContainer:
 
             # Adjacent placements against already placed parts
             for p in self.placed:
+                # Standard BBOX-edge candidates
                 cands.append((p['gx'] + p['w'] + self.gap, p['gy']))
                 cands.append((p['gx'] - cur_w - self.gap, p['gy']))
                 cands.append((p['gx'], p['gy'] + p['h'] + self.gap))
@@ -405,6 +448,32 @@ class EvolutionContainer:
                 cands.append((p['gx'] + p['w'] - cur_w, p['gy'] - cur_h - self.gap))
                 cands.append((self.cx - cur_w * 0.5, p['gy'] + p['h'] + self.gap))
                 cands.append((self.cx - cur_w * 0.5, p['gy'] - cur_h - self.gap))
+
+                # [v5.12] Concavity-aware candidates: scan INSIDE concave parts
+                p_poly_obj = p.get('_shapely_poly')
+                if p_poly_obj is not None and HAS_SHAPELY:
+                    # Check if this placed part has significant concavity
+                    p_bbox_area = p['w'] * p['h']
+                    try:
+                        p_real_area = p_poly_obj.area
+                    except Exception:
+                        p_real_area = p_bbox_area
+                    if p_real_area < p_bbox_area * 0.85:
+                        # Part is concave (area < 85% of BBOX) — generate interior candidates
+                        # Grid scan inside the placed part BBOX to find concavity pockets
+                        p_sx = max(4, int((p['w'] - cur_w) / max(cur_w * 0.3, 1.0)))
+                        p_sy = max(4, int((p['h'] - cur_h) / max(cur_h * 0.3, 1.0)))
+                        p_step_x = p['w'] / max(1, p_sx)
+                        p_step_y = p['h'] / max(1, p_sy)
+                        for psy in range(p_sy + 1):
+                            for psx in range(p_sx + 1):
+                                cx_c = p['gx'] + psx * p_step_x
+                                cy_c = p['gy'] + psy * p_step_y
+                                cands.append((cx_c, cy_c))
+                                # Also add offset candidates for better coverage
+                                for dx, dy in [(cur_w*0.25, 0), (0, cur_h*0.25), (cur_w*0.25, cur_h*0.25)]:
+                                    cands.append((cx_c + dx, cy_c + dy))
+
 
             for gx, gy in cands:
                 p_poly = get_transformed_poly(part_data, gx, gy, rot)
@@ -449,6 +518,7 @@ def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
             gx, gy, w, h, _ = pos
             entry = {'id': unplaced_part['id'], 'container_id': cnt.id, 'gx': gx, 'gy': gy, 'w': w, 'h': h, 'rot': rot, 'area': w*h}
             cnt.placed.append(entry)
+            cnt._store_placed_poly(entry, part_data=unplaced_part)
             cnt.placed_area += entry['area']
             return True
 
@@ -672,6 +742,7 @@ def rescue_unplaced_in_container(cnt, unplaced_part, gap=5.0):
             for r in best_r:
                 e = {'id': r['id'], 'container_id': cnt.id, 'gx': r['x'], 'gy': r['y'], 'w': r['w'], 'h': r['h'], 'rot': r['rot'], 'area': r['w'] * r['h']}
                 cnt.placed.append(e)
+                cnt._store_placed_poly(e, part_data=None)
                 cnt.placed_area += e['area']
             return True
 
@@ -728,6 +799,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                 _gsa = sum(_gpp[_gi][0]*_gpp[(_gi+1)%_gn][1] - _gpp[(_gi+1)%_gn][0]*_gpp[_gi][1] for _gi in range(_gn))
                 entry['area'] = max(abs(_gsa)*0.5, 1.0)
             best_cnt.placed.append(entry)
+            best_cnt._store_placed_poly(entry, part_data=gp)
             best_cnt.placed_area += entry['area']
             placed_plan.append(entry)
             remaining_ids.remove(gp['id'])
@@ -787,6 +859,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                                     _sp2s = sum(_sp2p[_i3][0]*_sp2p[(_i3+1)%_sp2n][1] - _sp2p[(_i3+1)%_sp2n][0]*_sp2p[_i3][1] for _i3 in range(_sp2n))
                                     e['area'] = max(abs(_sp2s)*0.5, 1.0)
                                 cnt.placed.append(e)
+                                cnt._store_placed_poly(e, part_data=_sp2)
                                 cnt.placed_area += e['area']
                                 placed_plan.append(e)
                                 if b_pid in remaining_ids:
@@ -844,6 +917,7 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                 _gsa = sum(_gpp[_gi][0]*_gpp[(_gi+1)%_gn][1] - _gpp[(_gi+1)%_gn][0]*_gpp[_gi][1] for _gi in range(_gn))
                 entry['area'] = max(abs(_gsa)*0.5, 1.0)
             best_cnt.placed.append(entry)
+            best_cnt._store_placed_poly(entry, part_data=p)
             best_cnt.placed_area += entry['area']
             best_cnt.do_float(entry, part_data=p)
             placed_plan.append(entry)
@@ -1080,6 +1154,7 @@ def post_verify_and_relax(plan, containers_data, parts_data=None, gap=5.0, margi
         if not collides:
             entry = dict(it)
             cnt.placed.append(entry)
+            cnt._store_placed_poly(entry, part_data=parts_map.get(entry.get('id')) if parts_map else None)
             cnt.placed_area += entry.get('area', entry['w'] * entry['h'])
             valid_plan.append(entry)
 
@@ -1334,6 +1409,8 @@ def _solve_standard_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         c_inst = EvolutionContainer(cnt, gap, margin)
         for it in clean_plan:
             c_inst.placed.append(dict(it))
+            _it_pdata = next((cp for cp in c_parts if cp['id'] == c_inst.placed[-1].get('id')), None)
+            c_inst._store_placed_poly(c_inst.placed[-1], part_data=_it_pdata)
             c_inst.placed_area += it.get('area', it['w'] * it['h'])
         for u in list(unplaced):
             if c_inst.area - c_inst.placed_area >= _calc_polygon_area(u):
@@ -1458,6 +1535,7 @@ def _solve_notch_first(cnt, all_parts, concave_parts, other_parts, gap=5.0, marg
         c_inst = EvolutionContainer(cnt, gap, margin)
         for it in combined_plan:
             c_inst.placed.append(dict(it))
+            c_inst._store_placed_poly(c_inst.placed[-1])
             c_inst.placed_area += it.get('area', it['w'] * it['h'])
         
         # Try to place remaining parts using standard BLF candidates
@@ -1477,6 +1555,7 @@ def _solve_notch_first(cnt, all_parts, concave_parts, other_parts, gap=5.0, marg
                     'area': cur_w * cur_h
                 }
                 c_inst.placed.append(entry)
+                c_inst._store_placed_poly(entry, part_data=p)
                 c_inst.placed_area += entry['area']
                 combined_plan.append(entry)
         
@@ -1670,6 +1749,8 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         for it in clean_plan:
             cnt = c_map[it['container_id']]
             cnt.placed.append(dict(it))
+            _it_pdata = None
+            cnt._store_placed_poly(cnt.placed[-1], part_data=_it_pdata)
             cnt.placed_area += it.get('area', it['w'] * it['h'])
 
         for u in list(unplaced_parts):
