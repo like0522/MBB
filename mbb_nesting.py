@@ -11,7 +11,7 @@ if sys.platform == 'win32':
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-26 21:32:00
+;;; LAST MODIFIED: 2026-10-26 23:14:15
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
 ;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
@@ -1368,7 +1368,16 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         non_concave_parts.append(p)
     
     if has_concave_giant and HAS_SHAPELY:
-        return _solve_notch_first(cnt, c_parts, concave_parts, non_concave_parts, gap, margin)
+        notch_result = _solve_notch_first(cnt, c_parts, concave_parts, non_concave_parts, gap, margin)
+        # [v5.13] If notch-first didn't place all parts, also try standard path
+        # and pick whichever placed more parts
+        if len(notch_result) >= len(c_parts):
+            return notch_result
+        std_result = _solve_standard_nesting(cnt, c_parts, gap, margin)
+        if len(std_result) > len(notch_result):
+            print(f"   >> [v5.13] Standard path ({len(std_result)}/{len(c_parts)}) beat Notch-First ({len(notch_result)}/{len(c_parts)})", flush=True)
+            return std_result
+        return notch_result
     
     # ========================================================================
     # Standard path (no concave giants): Original v5.8 algorithm
@@ -1550,47 +1559,75 @@ def _solve_notch_first(cnt, all_parts, concave_parts, other_parts, gap=5.0, marg
                     print(f"   >> [v5.9 Notch Fill] {len(sub_plan)} parts placed in notch ({len(remaining_small)} remaining)", flush=True)
     
     # Step 4: Place remaining parts in the main container's free area
-    # Build a combined plan with giant placements + notch placements
-    combined_plan = list(giant_plan) + list(notch_plans)
+    # [v5.13] Multi-seed strategy: try multiple orderings, pick the best
+    combined_plan_base = list(giant_plan) + list(notch_plans)
     
     if remaining_small:
-        # Create the main container instance with all existing placements
-        c_inst = EvolutionContainer(cnt, gap, margin)
-        for it in combined_plan:
-            c_inst.placed.append(dict(it))
-            c_inst._store_placed_poly(c_inst.placed[-1])
-            c_inst.placed_area += it.get('area', it['w'] * it['h'])
+        parts_map_local = {p['id']: p for p in all_parts}
         
-        # Try to place remaining parts using standard BLF candidates
-        remaining_sorted = sorted(remaining_small, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
+        # [v5.13] Generate multiple orderings for remaining parts
+        p_bigness = sorted(remaining_small, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
+        p_area = sorted(remaining_small, key=lambda p: (p['w'] * p['h']), reverse=True)
+        p_height = sorted(remaining_small, key=lambda p: max(p['w'], p['h']), reverse=True)
+        p_width = sorted(remaining_small, key=lambda p: min(p['w'], p['h']), reverse=True)
         
-        for p in remaining_sorted:
-            pw, ph = p['w'], p['h']
-            pos = c_inst.find_best_position(pw, ph, allowed_rotations=[0, 90], part_data=p)
-            if pos:
-                gx, gy, cur_w, cur_h, rot = pos
-                entry = {
-                    'id': p['id'],
-                    'container_id': cnt['id'],
-                    'gx': gx, 'gy': gy,
-                    'w': cur_w, 'h': cur_h,
-                    'rot': rot,
-                    'area': cur_w * cur_h
-                }
-                c_inst.placed.append(entry)
-                c_inst._store_placed_poly(entry, part_data=p)
-                c_inst.placed_area += entry['area']
-                combined_plan.append(entry)
+        orderings = [p_bigness, p_area, p_height, p_width]
         
-        # Rescue any still-unplaced parts
-        placed_ids = set(it['id'] for it in combined_plan)
-        still_unplaced = [p for p in remaining_small if p['id'] not in placed_ids]
-        for u in list(still_unplaced):
-            if c_inst.area - c_inst.placed_area >= u['w'] * u['h']:
-                if rescue_unplaced_in_container(c_inst, u, gap=gap):
-                    still_unplaced.remove(u)
+        best_placed_count = -1
+        best_combined = None
         
-        combined_plan = c_inst.placed
+        for ordering in orderings:
+            for strip in [True, False]:
+                # Build container instance with pre-placed giants + notch parts
+                c_inst = EvolutionContainer(cnt, gap, margin)
+                for it in combined_plan_base:
+                    c_inst.placed.append(dict(it))
+                    _it_pd = parts_map_local.get(it.get('id'))
+                    c_inst._store_placed_poly(c_inst.placed[-1], part_data=_it_pd)
+                    c_inst.placed_area += it.get('area', it['w'] * it['h'])
+                
+                trial_plan = list(combined_plan_base)
+                
+                for p in ordering:
+                    pw, ph = p['w'], p['h']
+                    pos = c_inst.find_best_position(pw, ph, allowed_rotations=[0, 90], part_data=p)
+                    if pos:
+                        gx, gy, cur_w, cur_h, rot = pos
+                        entry = {
+                            'id': p['id'],
+                            'container_id': cnt['id'],
+                            'gx': gx, 'gy': gy,
+                            'w': cur_w, 'h': cur_h,
+                            'rot': rot,
+                            'area': cur_w * cur_h
+                        }
+                        c_inst.placed.append(entry)
+                        c_inst._store_placed_poly(entry, part_data=p)
+                        c_inst.placed_area += entry['area']
+                        trial_plan.append(entry)
+                
+                # Rescue any still-unplaced parts
+                trial_placed_ids = set(it['id'] for it in trial_plan)
+                still_unplaced = [p for p in remaining_small if p['id'] not in trial_placed_ids]
+                for u in list(still_unplaced):
+                    if c_inst.area - c_inst.placed_area >= _calc_polygon_area(u):
+                        if rescue_unplaced_in_container(c_inst, u, gap=gap):
+                            still_unplaced.remove(u)
+                
+                trial_result = c_inst.placed
+                placed_cnt = len(trial_result)
+                
+                if placed_cnt > best_placed_count:
+                    best_placed_count = placed_cnt
+                    best_combined = list(trial_result)
+                    if placed_cnt >= len(combined_plan_base) + len(remaining_small):
+                        break  # All placed
+            if best_placed_count >= len(combined_plan_base) + len(remaining_small):
+                break
+        
+        combined_plan = best_combined if best_combined else combined_plan_base
+    else:
+        combined_plan = combined_plan_base
     
     # Final verification
     clean_plan = post_verify_and_relax(combined_plan, [cnt], parts_data=all_parts, gap=gap, margin=margin)
