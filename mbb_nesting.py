@@ -106,6 +106,23 @@ def get_transformed_poly(part_data, gx, gy, rot):
         return None
 
 
+def _actual_part_area(part_entry, parts_data_map=None):
+    """[v5.11d] Returns actual polygon area (Shoelace) instead of BBOX area."""
+    w, h = part_entry.get('w', 0), part_entry.get('h', 0)
+    bbox_area = w * h
+    # Try to find polygon data
+    poly = None
+    pid = part_entry.get('id')
+    if parts_data_map and pid in parts_data_map:
+        poly = parts_data_map[pid].get('polygon')
+    if not poly or len(poly) < 3:
+        return bbox_area
+    n = len(poly)
+    sa = sum(poly[i][0]*poly[(i+1)%n][1] - poly[(i+1)%n][0]*poly[i][1] for i in range(n))
+    actual = abs(sa) * 0.5
+    return actual if actual > 1.0 else bbox_area
+
+
 def is_point_in_poly(x, y, poly):
     """Ray casting algorithm for polygon containment check."""
     n = len(poly)
@@ -123,6 +140,19 @@ def is_point_in_poly(x, y, poly):
         p1x, p1y = p2x, p2y
     return inside
 
+
+
+def _calc_polygon_area(entry_or_part):
+    """Calculate actual polygon area using Shoelace formula.
+    Falls back to w*h if no polygon data available."""
+    poly = entry_or_part.get('polygon', [])
+    if poly and len(poly) >= 3:
+        n = len(poly)
+        sa = sum(poly[i][0] * poly[(i+1) % n][1] - poly[(i+1) % n][0] * poly[i][1] for i in range(n))
+        area = abs(sa) * 0.5
+        if area > 1.0:
+            return area
+    return entry_or_part.get('w', 0) * entry_or_part.get('h', 0)
 
 class EvolutionContainer:
     """
@@ -692,6 +722,11 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                 'rot': rot,
                 'area': cur_w * cur_h
             }
+            # [v5.11d] Use polygon actual area for placed_area tracking
+            if 'polygon' in gp and len(gp.get('polygon',[])) >= 3:
+                _gpp = gp['polygon']; _gn = len(_gpp)
+                _gsa = sum(_gpp[_gi][0]*_gpp[(_gi+1)%_gn][1] - _gpp[(_gi+1)%_gn][0]*_gpp[_gi][1] for _gi in range(_gn))
+                entry['area'] = max(abs(_gsa)*0.5, 1.0)
             best_cnt.placed.append(entry)
             best_cnt.placed_area += entry['area']
             placed_plan.append(entry)
@@ -745,6 +780,12 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                         if all_fit:
                             for b_pid, sx, sy, sw, sh, srot in stack_entries:
                                 e = {'id': b_pid, 'container_id': cid, 'gx': sx, 'gy': sy, 'w': sw, 'h': sh, 'rot': srot, 'area': sw * sh}
+                                # [v5.11d] Use polygon actual area for strips
+                                _sp2 = parts_dict.get(b_pid)
+                                if _sp2 and 'polygon' in _sp2 and len(_sp2.get('polygon',[])) >= 3:
+                                    _sp2p = _sp2['polygon']; _sp2n = len(_sp2p)
+                                    _sp2s = sum(_sp2p[_i3][0]*_sp2p[(_i3+1)%_sp2n][1] - _sp2p[(_i3+1)%_sp2n][0]*_sp2p[_i3][1] for _i3 in range(_sp2n))
+                                    e['area'] = max(abs(_sp2s)*0.5, 1.0)
                                 cnt.placed.append(e)
                                 cnt.placed_area += e['area']
                                 placed_plan.append(e)
@@ -797,6 +838,11 @@ def evaluate_individual_genome(genome, containers_data, gap=5.0, margin=1.0):
                 'rot': rot,
                 'area': cur_w * cur_h
             }
+            # [v5.11d] Use polygon actual area for placed_area tracking
+            if 'polygon' in p and len(p.get('polygon',[])) >= 3:
+                _gpp = p['polygon']; _gn = len(_gpp)
+                _gsa = sum(_gpp[_gi][0]*_gpp[(_gi+1)%_gn][1] - _gpp[(_gi+1)%_gn][0]*_gpp[_gi][1] for _gi in range(_gn))
+                entry['area'] = max(abs(_gsa)*0.5, 1.0)
             best_cnt.placed.append(entry)
             best_cnt.placed_area += entry['area']
             best_cnt.do_float(entry, part_data=p)
@@ -1034,7 +1080,7 @@ def post_verify_and_relax(plan, containers_data, parts_data=None, gap=5.0, margi
         if not collides:
             entry = dict(it)
             cnt.placed.append(entry)
-            cnt.placed_area += entry['w'] * entry['h']
+            cnt.placed_area += entry.get('area', entry['w'] * entry['h'])
             valid_plan.append(entry)
 
     return valid_plan
@@ -1288,9 +1334,9 @@ def _solve_standard_nesting(cnt, c_parts, gap=5.0, margin=1.0):
         c_inst = EvolutionContainer(cnt, gap, margin)
         for it in clean_plan:
             c_inst.placed.append(dict(it))
-            c_inst.placed_area += it['w'] * it['h']
+            c_inst.placed_area += it.get('area', it['w'] * it['h'])
         for u in list(unplaced):
-            if c_inst.area - c_inst.placed_area >= u['w'] * u['h']:
+            if c_inst.area - c_inst.placed_area >= _calc_polygon_area(u):
                 if rescue_unplaced_in_container(c_inst, u, gap=gap):
                     unplaced.remove(u)
         re_plan = c_inst.placed
@@ -1412,7 +1458,7 @@ def _solve_notch_first(cnt, all_parts, concave_parts, other_parts, gap=5.0, marg
         c_inst = EvolutionContainer(cnt, gap, margin)
         for it in combined_plan:
             c_inst.placed.append(dict(it))
-            c_inst.placed_area += it['w'] * it['h']
+            c_inst.placed_area += it.get('area', it['w'] * it['h'])
         
         # Try to place remaining parts using standard BLF candidates
         remaining_sorted = sorted(remaining_small, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
@@ -1624,7 +1670,7 @@ def solve_nesting(json_in_path, lsp_out_path, json_out_path, mode='fast'):
         for it in clean_plan:
             cnt = c_map[it['container_id']]
             cnt.placed.append(dict(it))
-            cnt.placed_area += it['w'] * it['h']
+            cnt.placed_area += it.get('area', it['w'] * it['h'])
 
         for u in list(unplaced_parts):
             for cid, cnt in c_map.items():
