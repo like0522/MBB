@@ -7,13 +7,21 @@ if sys.platform == 'win32':
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.9 - L-in-L Concave Notch Sub-Cavity Nesting Engine
+;;; MBBN v5.18 - 20-Core Timeout-Guarded Competitive Evolution Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-27 00:04:15
+;;; LAST MODIFIED: 2026-10-27 16:48:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.18 (2026-10-27 16:48:00) : 20-Core GA 타임아웃 가드 & 시간예산제 도입
+;;;                                 1. executor.submit + as_completed(timeout=15) 교체: 세대별 15초 타임아웃 보호
+;;;                                 2. 전체 GA 시간예산: fast=30초 / full=60초, 초과 시 현재 챔피언으로 즉시 확정
+;;;                                 3. 개체별 Future 취소 + 안전 fallback으로 L자/복잡 컨테이너 행(hang) 방지
+;;; - v5.17 (2026-10-27 06:05:00) : 20-Core Parallel Competitive Evolution & Random Yield Competition
+;;;                                 1. _parallel_competitive_nesting(): 20개 코어 풀가동 GA 수율경쟁 엔진
+;;;                                 2. 결정론적 시드 6종 + 랜덤 셔플 개체군 14종 = 20 개체 동시 경쟁
+;;;                                 3. 세대별 엘리트 보존 + 돌연변이(교환/회전/스트립 반전) 진화
 ;;; - v5.10 (2026-10-26 21:32:00) : 빈 컨테이너 자동 단품 복제 배치 시스템 탑재
 
 ;;;                                  1. clone_parts_for_empty_containers(): 빈 컨테이너에 유사 컨테이너의 단품 세트 자동 복제
@@ -1681,17 +1689,178 @@ def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, max_iters=5):
     return best_plan
 
 
-def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
+
+def _parallel_competitive_nesting(cnt, c_parts, gap=5.0, margin=1.0, mode='fast'):
     """
-    [v5.9] Solves nesting for a single container with Notch-First Sub-Cavity strategy.
-    Phase 1: Place giant concave parts, then detect notch sub-cavities and fill them first.
-    Phase 2: Place remaining parts in the main container using standard BLF.
-    Guarantees strict boundary containment and 5mm clearance.
+    [v5.18] 20-Core Timeout-Guarded Competitive Evolution Engine.
+    Uses submit+as_completed with per-generation timeout and overall time budget
+    to prevent hangs on complex (L-shaped, concave) containers.
     """
-    # ========================================================================
-    # [v5.9] Phase 0: Detect if any part is concave (has polygon with notch)
-    # If so, use the Notch-First strategy
-    # ========================================================================
+    if len(c_parts) <= 1:
+        return _solve_standard_nesting(cnt, c_parts, gap, margin)
+
+    cpu_count = os.cpu_count() or 20
+    if mode == 'fast':
+        pop_size = max(20, cpu_count)
+        num_generations = 8
+        max_stagnant = 3
+        gen_timeout = 15       # seconds per generation
+        total_budget = 30      # total seconds for GA
+    else:
+        pop_size = max(40, cpu_count * 2)
+        num_generations = 20
+        max_stagnant = 5
+        gen_timeout = 30
+        total_budget = 60
+
+    num_workers = min(pop_size, cpu_count)
+
+    print(f"   >> [v5.18 20-Core GA] {num_workers}개 CPU 코어 풀가동 수율경쟁 시작 (개체군: {pop_size}, 최대 {num_generations}세대, 시간예산: {total_budget}초)", flush=True)
+
+    # 1. Deterministic heuristic seeds
+    p_bigness = sorted(c_parts, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
+    p_area = sorted(c_parts, key=lambda p: (p['w'] * p['h']), reverse=True)
+    p_height = sorted(c_parts, key=lambda p: max(p['w'], p['h']), reverse=True)
+    p_width = sorted(c_parts, key=lambda p: min(p['w'], p['h']), reverse=True)
+
+    population = [
+        {'parts_order': list(p_bigness), 'c_order': [cnt['id']], 'use_strip': True, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+        {'parts_order': list(p_bigness), 'c_order': [cnt['id']], 'use_strip': False, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+        {'parts_order': list(p_area), 'c_order': [cnt['id']], 'use_strip': True, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+        {'parts_order': list(p_area), 'c_order': [cnt['id']], 'use_strip': False, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+        {'parts_order': list(p_height), 'c_order': [cnt['id']], 'use_strip': False, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+        {'parts_order': list(p_width), 'c_order': [cnt['id']], 'use_strip': True, 'rot_prefs': {p['id']: [0, 90] for p in c_parts}},
+    ]
+
+    # 2. Fill the rest with diverse randomized individuals
+    while len(population) < pop_size:
+        shuffled_p = list(c_parts)
+        random.shuffle(shuffled_p)
+        rand_rots = {}
+        for p in c_parts:
+            rand_rots[p['id']] = random.choice([[0], [90], [0, 90]])
+        population.append({
+            'parts_order': shuffled_p,
+            'c_order': [cnt['id']],
+            'use_strip': random.choice([True, False]),
+            'rot_prefs': rand_rots
+        })
+
+    champion = None
+    stagnant_gens = 0
+    ga_start = time.time()
+
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+            for gen in range(1, num_generations + 1):
+                # Time budget check
+                elapsed = time.time() - ga_start
+                if elapsed >= total_budget:
+                    print(f"   >> [v5.18 GA] 시간예산 {total_budget}초 소진 -> {gen-1}세대에서 확정", flush=True)
+                    break
+
+                remaining_budget = total_budget - elapsed
+                this_gen_timeout = min(gen_timeout, remaining_budget)
+
+                # Submit all genomes as individual futures
+                future_to_idx = {}
+                for idx, genome in enumerate(population):
+                    fut = executor.submit(_eval_genome_worker, (genome, [cnt], gap, margin))
+                    future_to_idx[fut] = idx
+
+                results = []
+                timed_out = False
+                try:
+                    for fut in concurrent.futures.as_completed(future_to_idx, timeout=this_gen_timeout):
+                        try:
+                            res = fut.result(timeout=1.0)
+                            results.append(res)
+                        except Exception:
+                            pass
+                except concurrent.futures.TimeoutError:
+                    timed_out = True
+                    # Cancel remaining futures
+                    for fut in future_to_idx:
+                        if not fut.done():
+                            fut.cancel()
+                    if timed_out and results:
+                        print(f"   >> [v5.18 GA Gen {gen}] {len(results)}/{pop_size}개 완료 (타임아웃 {this_gen_timeout:.0f}초)", flush=True)
+
+                if not results:
+                    print(f"   >> [v5.18 GA Gen {gen}] 결과 없음 -> 종료", flush=True)
+                    break
+
+                results.sort(key=lambda r: r['score'], reverse=True)
+                best = results[0]
+
+                top_y = 0
+                if best['plan'] and 'outer_bbox' in cnt:
+                    top_y = max(e['gy'] + e['h'] for e in best['plan']) - cnt['outer_bbox'][1]
+
+                if champion is None or best['score'] > champion['score']:
+                    champion = best
+                    stagnant_gens = 0
+                    print(f"   >> [Gen {gen:2d}/{num_generations}] 신규 챔피언! 안착: {best['placed_count']}/{len(c_parts)}개 | 상단: {top_y:.0f}mm | Score: {int(best['score'])}", flush=True)
+                else:
+                    stagnant_gens += 1
+                    if stagnant_gens >= max_stagnant:
+                        print(f"   >> [Gen {gen:2d}/{num_generations}] {stagnant_gens}세대 수렴 완료 -> 최적 챔피언 확정", flush=True)
+                        break
+
+                if gen == num_generations:
+                    break
+
+                # Elitism & Mutation for next generation
+                next_pop = [champion['genome']]
+                for i in range(min(3, len(results))):
+                    next_pop.append(results[i]['genome'])
+
+                while len(next_pop) < pop_size:
+                    parent = random.choice(results[:min(8, len(results))])['genome']
+                    mutant = {
+                        'parts_order': list(parent['parts_order']),
+                        'c_order': [cnt['id']],
+                        'use_strip': parent['use_strip'],
+                        'rot_prefs': dict(parent['rot_prefs'])
+                    }
+                    r = random.random()
+                    if r < 0.5:
+                        i1, i2 = random.sample(range(len(c_parts)), 2)
+                        mutant['parts_order'][i1], mutant['parts_order'][i2] = mutant['parts_order'][i2], mutant['parts_order'][i1]
+                    elif r < 0.8:
+                        tp = random.choice(c_parts)
+                        mutant['rot_prefs'][tp['id']] = random.choice([[0], [90], [0, 90]])
+                    else:
+                        mutant['use_strip'] = not mutant['use_strip']
+                    next_pop.append(mutant)
+
+                population = next_pop
+
+    except Exception as e:
+        print(f"   >> [v5.18 Parallel Fallback] {e}", flush=True)
+        return _solve_standard_nesting(cnt, c_parts, gap, margin)
+
+    elapsed_total = time.time() - ga_start
+    print(f"   >> [v5.18 GA 완료] 총 {elapsed_total:.1f}초 소요", flush=True)
+
+    if champion and champion.get('plan'):
+        clean_plan = post_verify_and_relax(champion['plan'], [cnt], parts_data=c_parts, gap=gap, margin=margin)
+        return clean_plan
+    return _solve_standard_nesting(cnt, c_parts, gap, margin)
+
+
+def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0, mode='fast'):
+    """
+    [v5.18] 20-Core Timeout-Guarded Competitive Evolution & Shrink-Press Orchestrator.
+    Combines:
+    1. Notch-First Deterministic baseline (for concave giant parts)
+    2. 20-Core Parallel Genetic Algorithm (multi-core random yield competition)
+    3. Shrink-Press Bounding Box Minimization
+    4. 2D Cavity Compaction & Gravity Settle
+    """
+    if len(c_parts) <= 1:
+        return _solve_standard_nesting(cnt, c_parts, gap, margin)
+
     has_concave_giant = False
     concave_parts = []
     non_concave_parts = []
@@ -1699,8 +1868,6 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     for p in c_parts:
         if 'polygon' in p and len(p.get('polygon', [])) >= 4:
             bbox_area = p['w'] * p['h']
-            # [v5.9d FIX] Compute actual polygon area from vertices (Shoelace formula)
-            # because MBB.LSP exports area=w*h (BBOX area), not the true polygon area
             poly_pts = p['polygon']
             n_pts = len(poly_pts)
             shoelace_area = 0.0
@@ -1714,40 +1881,72 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0):
                 concave_parts.append(p)
                 continue
         non_concave_parts.append(p)
-    
+
+    # [v5.18] Detect if container itself is concave (L-shaped, polygon with >4 vertices)
+    cnt_is_concave = False
+    cnt_poly = cnt.get('outer_polygon')
+    if cnt_poly and len(cnt_poly) > 4:
+        cnt_is_concave = True
+
+    candidates = []
+
+    # Strategy 1: Notch-First (if concave giant part exists)
     if has_concave_giant and HAS_SHAPELY:
-        notch_result = _solve_notch_first(cnt, c_parts, concave_parts, non_concave_parts, gap, margin)
-        # [v5.13] If notch-first didn't place all parts, also try standard path
-        # and pick whichever placed more parts
-        if len(notch_result) >= len(c_parts):
-            result = notch_result
-        else:
-            std_result = _shrink_press_loop(cnt, c_parts, gap, margin)
-            if len(std_result) > len(notch_result):
-                print(f"   >> [v5.13] Standard path ({len(std_result)}/{len(c_parts)}) beat Notch-First ({len(notch_result)}/{len(c_parts)})", flush=True)
-                result = std_result
-            else:
-                result = notch_result
+        notch_res = _solve_notch_first(cnt, c_parts, concave_parts, non_concave_parts, gap, margin)
+        candidates.append(notch_res)
+
+        # [v5.18 SHORTCUT] If Notch-First achieved 100% placement AND container is concave,
+        # skip GA and Standard (they are extremely slow on L-shaped containers due to
+        # Shapely polygon containment checks in find_best_position/can_place).
+        if len(notch_res) == len(c_parts):
+            print(f"   >> [v5.18] Notch-First 100% ({len(notch_res)}/{len(c_parts)}) -> GA/Standard 건너뛰고 후처리만 수행", flush=True)
+            best_candidate = notch_res
+            # Only lightweight post-processing: Compact + Gravity
+            best_candidate = _compact_minimize_height(best_candidate, cnt, c_parts, gap, margin)
+            best_candidate = _gravity_compact(best_candidate, cnt, c_parts, gap, margin)
+            return best_candidate
+
+    # [v5.18] For concave containers, skip GA (too slow) and only use Standard with reduced seeds
+    if cnt_is_concave:
+        print(f"   >> [v5.18] 오목 컨테이너 감지 -> 경량 Standard 배치만 수행", flush=True)
+        std_res = _solve_standard_nesting(cnt, c_parts, gap, margin)
+        candidates.append(std_res)
     else:
-        # ========================================================================
-        # Standard path (no concave giants): Original v5.8 algorithm
-        # ========================================================================
-        result = _shrink_press_loop(cnt, c_parts, gap, margin)
-    
-    # ========================================================================
-    # [v5.14] Gravity Compaction: settle all parts toward container bottom
-    # ========================================================================
-    result = _gravity_compact(result, cnt, c_parts, gap, margin)
-    
-    # ========================================================================
-    # [v5.15] Strip Height Minimization: iterative compact press
-    # Repositions parts (X shift + rotation) to minimize strip height
-    # so the top cutting line is as low/horizontal as possible
-    # ========================================================================
-    result = _compact_minimize_height(result, cnt, c_parts, gap, margin)
-    return result
+        # Strategy 2: 20-Core Parallel Competitive Evolution (for rectangular containers)
+        ga_res = _parallel_competitive_nesting(cnt, c_parts, gap, margin, mode=mode)
+        candidates.append(ga_res)
 
+        # Strategy 3: Standard Deterministic
+        std_res = _solve_standard_nesting(cnt, c_parts, gap, margin)
+        candidates.append(std_res)
 
+    # Pick the champion candidate:
+    # 1. Most parts placed
+    # 2. Lowest strip height (flatter cutting horizon)
+    def eval_plan(p_list):
+        if not p_list:
+            return (-1, 0, float('inf'))
+        p_cnt = len(p_list)
+        p_area = sum(e.get('area', e['w'] * e['h']) for e in p_list)
+        top_y = max(e['gy'] + e['h'] for e in p_list)
+        return (p_cnt, p_area, -top_y)
+
+    candidates.sort(key=eval_plan, reverse=True)
+    best_candidate = candidates[0]
+
+    # Strategy 4: Shrink-Press Optimization (only for rectangular containers, if 100% placed)
+    if not cnt_is_concave and len(best_candidate) == len(c_parts):
+        shrunk = _shrink_press_loop(cnt, c_parts, gap, margin)
+        if len(shrunk) == len(c_parts):
+            best_candidate = shrunk
+
+    # Strategy 5: 2D Cavity Drop & Pairwise Swap Compaction
+    best_candidate = _compact_minimize_height(best_candidate, cnt, c_parts, gap, margin)
+
+    # Strategy 6: Final Gravity Compaction
+    best_candidate = _gravity_compact(best_candidate, cnt, c_parts, gap, margin)
+
+    return best_candidate
 def _solve_standard_nesting(cnt, c_parts, gap=5.0, margin=1.0):
     """[v5.8] Original standard nesting algorithm."""
     p_bigness = sorted(c_parts, key=lambda p: (p['w'] * p['h'] + max(p['w'], p['h']) * 500.0), reverse=True)
@@ -2109,7 +2308,7 @@ def solve_grouped_nesting(containers_data, parts_data, gap=5.0, margin=1.0, mode
         if not c_parts:
             continue
 
-        clean_plan = solve_single_container_nesting(c, c_parts, gap=gap, margin=margin)
+        clean_plan = solve_single_container_nesting(c, c_parts, gap=gap, margin=margin, mode=mode)
         placed_pids = set(it['id'] for it in clean_plan)
 
         for it in clean_plan:
