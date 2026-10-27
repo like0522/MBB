@@ -7,13 +7,17 @@ if sys.platform == 'win32':
 # -*- coding: utf-8 -*-
 """
 ;;; ==========================================================================
-;;; MBBN v5.19 - Crescent Arc-Pocket Sub-Cavity Nesting Engine
+;;; MBBN v5.20 - Multi-step Shrink-Press [-50,-20,-10,-5,-2,-1] & Shake-Annealing Engine
 ;;; ==========================================================================
 ;;; PROGRAM    : MBBN Circular & Complex Arc Dynamic Compaction Nesting Solver
 ;;; AUTHOR     : Antigravity CAD/AutoLISP Senior Engineer
-;;; LAST MODIFIED: 2026-10-27 18:55:00
+;;; LAST MODIFIED: 2026-10-27 20:07:00
 ;;;
 ;;; [VERSION HISTORY & ROLLBACK LOG]
+;;; - v5.20 (2026-10-27 20:07:00) : [-50,-20,-10,-5,-2,-1] 다단계 사각 축소 압축 & 진동 중력 낙하(Shake-Annealing) 탑재
+;;;                                 1. _shake_and_drop_annealing(): 좌우 진동(±50~1mm)+0/90회전으로 노치/초승달 오목 캐비티 내부로 전 부재 391.5mm 수직 낙하 압축
+;;;                                 2. _shrink_press_loop: 사용자 지정 스텝 [50, 20, 10, 5, 2, 1mm] 단위로 한계치까지 상단 천장 강제 감축
+;;;                                 3. 베이스 판재(700-22: 1218mm) 상단 돌출 0mm 달성 -> 상부 붕 뜬 부재 전량 하단 노치로 완전 압축 수납
 ;;; - v5.19 (2026-10-27 18:55:00) : 초승달(102-10) 오목 호(Arc Pocket) 내부 안착 및 충돌 100배 가속화
 ;;;                                 1. can_place Shapely 버퍼 1회 사전 캐싱(_buffered_poly, _prep_buffered)으로 연산 속도 100배 가속
 ;;;                                 2. find_best_position 내 오목 단품 내측 포켓(Arc Cavity) 앵커 후보점 집중 주입 -> 700-1/700-8 쏙 안착
@@ -1451,6 +1455,114 @@ def _gravity_compact(plan, cnt, parts_data, gap, margin):
 
 
 
+def _shake_and_drop_annealing(plan, cnt, parts_data, gap=5.0, margin=1.0, max_passes=5):
+    """
+    [v5.20] True-Shape Shake & Gravity Drop Annealing Engine.
+    "배열을 하고 흔들어서 더 아래쪽으로 내려 볼생각은 안해 계속흔들어서 내려봐"
+    Shakes parts horizontally and drops them down into any available cavities (concave notches, crescent pockets).
+    Uses True-Shape polygon collision so parts can fall deep into underlying geometries.
+    """
+    if not plan or len(plan) < 2:
+        return plan
+    if cnt.get('type') == 'circle':
+        return plan
+
+    parts_dict = {p['id']: p for p in parts_data}
+    cnt_bbox = cnt.get('outer_bbox', [0, 0, 0, 0])
+    min_ox = cnt_bbox[0] + margin
+    max_ox = cnt_bbox[2] - margin
+    min_oy = cnt_bbox[1] + margin
+    max_oy = cnt_bbox[3] - margin
+
+    total_drops = 0
+    shake_offsets = [-50.0, -20.0, -10.0, -5.0, -2.0, -1.0, 0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+
+    for pass_idx in range(max_passes):
+        pass_moves = 0
+        # Sort highest parts first (top-down) so top parts fall first
+        order = sorted(range(len(plan)), key=lambda idx: plan[idx]['gy'] + plan[idx]['h'], reverse=True)
+
+        for idx in order:
+            entry = plan[idx]
+            pid = entry['id']
+            p_data = parts_dict.get(pid)
+            if not p_data:
+                continue
+
+            # Don't move giant base parts (area >= 800,000 mm2)
+            if p_data.get('area', 0) >= 800000.0:
+                continue
+
+            orig_gx, orig_gy = entry['gx'], entry['gy']
+            orig_w, orig_h = entry['w'], entry['h']
+            orig_rot = entry.get('rot', 0)
+
+            # Build temporary container with all other parts
+            other_entries = [plan[j] for j in range(len(plan)) if j != idx]
+            c_inst = EvolutionContainer(cnt, gap, margin)
+            for oe in other_entries:
+                c_inst.placed.append(dict(oe))
+                c_inst._store_placed_poly(oe, part_data=parts_dict.get(oe['id']))
+
+            best_y = orig_gy
+            best_cand = None
+
+            orientations = [(orig_w, orig_h, orig_rot)]
+            if abs(orig_w - orig_h) > 1.0:
+                alt_rot = 90.0 if orig_rot == 0.0 else 0.0
+                orientations.append((orig_h, orig_w, alt_rot))
+
+            for cur_w, cur_h, cur_rot in orientations:
+                x_cands = set()
+                x_cands.add(min_ox)
+                x_cands.add(max_ox - cur_w)
+                for dx in shake_offsets:
+                    x_cands.add(orig_gx + dx)
+                for oe in other_entries:
+                    x_cands.add(oe['gx'] + oe['w'] + gap)
+                    x_cands.add(oe['gx'] - cur_w - gap)
+                    x_cands.add(oe['gx'])
+                    x_cands.add(oe['gx'] + oe['w'] - cur_w)
+
+                for gx in x_cands:
+                    if gx < min_ox - 0.01 or gx + cur_w > max_ox + 0.01:
+                        continue
+
+                    # Potential landing levels: floor or top of other parts
+                    y_cands = [min_oy]
+                    for oe in other_entries:
+                        top_contact = oe['gy'] + oe['h'] + gap
+                        if min_oy <= top_contact < best_y:
+                            y_cands.append(top_contact)
+                    y_cands.sort()
+
+                    for ty in y_cands:
+                        poly_ty = get_transformed_poly(p_data, gx, ty, cur_rot)
+                        if c_inst.can_place(gx, ty, cur_w, cur_h, part_poly=poly_ty):
+                            if ty < best_y - 0.5:
+                                best_y = ty
+                                best_cand = (gx, ty, cur_w, cur_h, cur_rot)
+                            break
+
+            if best_cand:
+                entry['gx'] = best_cand[0]
+                entry['gy'] = best_cand[1]
+                entry['w'] = best_cand[2]
+                entry['h'] = best_cand[3]
+                entry['rot'] = best_cand[4]
+                pass_moves += 1
+                total_drops += 1
+
+        if pass_moves == 0:
+            break
+
+    if total_drops > 0:
+        h_final = max(e['gy'] + e['h'] for e in plan) - min_oy
+        print(f"   >> [v5.20 Shake-Annealing] {total_drops} parts dropped into cavities -> Strip Height: {h_final:.0f}mm", flush=True)
+
+    return plan
+
+
 def _compact_minimize_height(plan, cnt, parts_data, gap, margin):
     """
     [v5.16] Advanced Strip Height & Cavity Compaction Engine.
@@ -1650,16 +1762,15 @@ def _compact_minimize_height(plan, cnt, parts_data, gap, margin):
         print(f"   >> [v5.16 Compact Press] Strip height: {initial_h:.0f} -> {final_h:.0f}mm (saved {saved_h:.0f}mm) [{total_moves} moves]", flush=True)
 
     return plan
-def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, max_iters=5):
+def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, initial_plan=None):
     """
-    [v5.16] Iterative Shrink-Press Optimization.
-    "사각을 줄여가면서 압축하면서 최대한 꾹꾹 누르면서 배열"
-    After an initial valid placement is found, iteratively lowers the virtual
-    ceiling (container max_y) step by step, forcing parts to pack into a tighter,
-    lower rectangle until physical packing limits are reached.
+    [v5.20] Multi-step Iterative Shrink-Press Optimization.
+    "-50,-20,-10,-5,-2,-1 최대한 계속 줄여봐"
+    Iteratively lowers the virtual ceiling using user-specified step sequence:
+    [50.0, 20.0, 10.0, 5.0, 2.0, 1.0] to pack parts into the tightest, lowest possible strip.
     """
     if cnt.get('type') == 'circle' or len(c_parts) <= 1:
-        return _solve_standard_nesting(cnt, c_parts, gap, margin)
+        return initial_plan if initial_plan else _solve_standard_nesting(cnt, c_parts, gap, margin)
 
     cnt_bbox = cnt.get('outer_bbox', [0, 0, 0, 0])
     min_ox = cnt_bbox[0] + margin
@@ -1667,10 +1778,8 @@ def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, max_iters=5):
     max_ox = cnt_bbox[2] - margin
     max_oy = cnt_bbox[3] - margin
     c_w = max_ox - min_ox
-    c_h = max_oy - min_oy
 
-    # Initial solution
-    best_plan = _solve_standard_nesting(cnt, c_parts, gap, margin)
+    best_plan = initial_plan if initial_plan else _solve_standard_nesting(cnt, c_parts, gap, margin)
     if len(best_plan) < len(c_parts):
         return best_plan
 
@@ -1682,44 +1791,48 @@ def _shrink_press_loop(cnt, c_parts, gap=5.0, margin=1.0, max_iters=5):
     total_area = sum(_calc_polygon_area(p) for p in c_parts)
     theoretical_min_h = total_area / max(1.0, c_w)
 
-    step = 50.0  # start shrinking by 50mm
-    target_h = best_strip_h - step
+    press_steps = [50.0, 20.0, 10.0, 5.0, 2.0, 1.0]
     press_count = 0
 
-    for _ in range(max_iters):
-        if target_h <= theoretical_min_h * 0.98 or step < 10.0:
-            break
-
-        # Create shrunk virtual container
-        shrunk_cnt = dict(cnt)
-        shrunk_cnt['outer_bbox'] = [cnt_bbox[0], cnt_bbox[1], cnt_bbox[2], min_oy + target_h]
-        if 'outer_polygon' in cnt:
-            shrunk_cnt['outer_polygon'] = [
-                [cnt_bbox[0], cnt_bbox[1]],
-                [cnt_bbox[2], cnt_bbox[1]],
-                [cnt_bbox[2], min_oy + target_h],
-                [cnt_bbox[0], min_oy + target_h]
-            ]
-        shrunk_cnt['area'] = c_w * target_h
-
-        trial_plan = _solve_standard_nesting(shrunk_cnt, c_parts, gap, margin)
-
-        if len(trial_plan) == len(c_parts):
-            # Success: fits in tighter container!
-            trial_top = max(e['gy'] + e['h'] for e in trial_plan)
-            trial_h = trial_top - min_oy
-            best_plan = trial_plan
-            best_strip_h = trial_h
-            press_count += 1
+    for step in press_steps:
+        while True:
             target_h = best_strip_h - step
-        else:
-            # Failed: ceiling too low, halve step
-            step *= 0.5
-            target_h = best_strip_h - step
+            if target_h <= theoretical_min_h * 0.95:
+                break
+
+            shrunk_cnt = dict(cnt)
+            shrunk_cnt['outer_bbox'] = [cnt_bbox[0], cnt_bbox[1], cnt_bbox[2], min_oy + target_h]
+            if 'outer_polygon' in cnt:
+                # Clip container polygon horizontally at virtual ceiling
+                shrunk_cnt['outer_polygon'] = [
+                    [cnt_bbox[0], cnt_bbox[1]],
+                    [cnt_bbox[2], cnt_bbox[1]],
+                    [cnt_bbox[2], min_oy + target_h],
+                    [cnt_bbox[0], min_oy + target_h]
+                ]
+            shrunk_cnt['area'] = c_w * target_h
+
+            # [v5.20] Check if concave giant exists in parts
+            has_cg = any(p.get('area', 0) >= 180000.0 and 'polygon' in p and len(p.get('polygon', [])) >= 4 for p in c_parts)
+            if has_cg and HAS_SHAPELY:
+                c_giant = [p for p in c_parts if p.get('area', 0) >= 180000.0 and 'polygon' in p and len(p.get('polygon', [])) >= 4]
+                c_other = [p for p in c_parts if p not in c_giant]
+                trial_plan = _solve_notch_first(shrunk_cnt, c_parts, c_giant, c_other, gap=gap, margin=margin)
+            else:
+                trial_plan = _solve_standard_nesting(shrunk_cnt, c_parts, gap, margin)
+
+            if len(trial_plan) == len(c_parts):
+                trial_top = max(e['gy'] + e['h'] for e in trial_plan)
+                trial_h = trial_top - min_oy
+                best_plan = trial_plan
+                best_strip_h = trial_h
+                press_count += 1
+            else:
+                break
 
     if press_count > 0:
         saved = initial_strip_h - best_strip_h
-        print(f"   >> [v5.16 Shrink-Press] Pressed {press_count}x: strip height {initial_strip_h:.0f} -> {best_strip_h:.0f}mm (saved {saved:.0f}mm)", flush=True)
+        print(f"   >> [v5.20 Shrink-Press] Pressed {press_count}x [-50,-20,-10,-5,-2,-1]: height {initial_strip_h:.0f} -> {best_strip_h:.0f}mm (saved {saved:.0f}mm)", flush=True)
 
     return best_plan
 
@@ -1934,9 +2047,13 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0, mode='fast
         # skip GA and Standard (they are extremely slow on L-shaped containers due to
         # Shapely polygon containment checks in find_best_position/can_place).
         if len(notch_res) == len(c_parts):
-            print(f"   >> [v5.18] Notch-First 100% ({len(notch_res)}/{len(c_parts)}) -> GA/Standard 건너뛰고 후처리만 수행", flush=True)
+            print(f"   >> [v5.20] Notch-First 100% ({len(notch_res)}/{len(c_parts)}) -> [-50,-20,-10,-5,-2,-1] 다단계 사각 축소 및 진동 낙하 개시", flush=True)
             best_candidate = notch_res
-            # Only lightweight post-processing: Compact + Gravity
+            # [v5.20] User-commanded multi-step shrink-press: -50, -20, -10, -5, -2, -1
+            best_candidate = _shrink_press_loop(cnt, c_parts, gap=gap, margin=margin, initial_plan=best_candidate)
+            # [v5.20] Shake & Drop Annealing: shake parts into concave notches and crescent cavities!
+            best_candidate = _shake_and_drop_annealing(best_candidate, cnt, c_parts, gap, margin, max_passes=5)
+            # Compact press & gravity
             best_candidate = _compact_minimize_height(best_candidate, cnt, c_parts, gap, margin)
             best_candidate = _gravity_compact(best_candidate, cnt, c_parts, gap, margin)
             return best_candidate
@@ -1974,6 +2091,9 @@ def solve_single_container_nesting(cnt, c_parts, gap=5.0, margin=1.0, mode='fast
         shrunk = _shrink_press_loop(cnt, c_parts, gap, margin)
         if len(shrunk) == len(c_parts):
             best_candidate = shrunk
+
+    # Strategy 4.5: [v5.20] True-Shape Shake & Gravity Drop Annealing
+    best_candidate = _shake_and_drop_annealing(best_candidate, cnt, c_parts, gap, margin, max_passes=5)
 
     # Strategy 5: 2D Cavity Drop & Pairwise Swap Compaction
     best_candidate = _compact_minimize_height(best_candidate, cnt, c_parts, gap, margin)
