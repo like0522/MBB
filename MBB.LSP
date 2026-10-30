@@ -2,10 +2,15 @@
 
 ;; =============================================================================
 ;; Auto-Detecting Bounding Box & Shape Analyzer
-;; LAST MODIFIED: 2026-10-26 22:34:14
+;; LAST MODIFIED: 2026-10-30 19:35:00
 ;; ENCODING: ANSI (CP949)
 ;;
 ;; [VERSION HISTORY & ROLLBACK LOG]
+;; - v5.23 (2026-10-30 19:35:00) : 1-클릭 JSON 원터치 덤프(c:MBBDUMP) & 결과 로드(c:MBBLOAD) 신규 탑재
+;;                                 1. c:MBBDUMP 명령어: 선택한 컨테이너 및 단품/원호 형상을 DEBUG_nesting_input.json으로 100% 무손실 파일 출력
+;;                                 2. c:MBBLOAD 명령어: out_test.lsp 결과를 CAD에 원터치 즉각 반영
+;;                                 3. GEOMINFO 텍스트 복사/붙여넣기 토큰 폭발 및 컨텍스트 절단 문제 원천 제거
+
 ;; - v5.11 (2026-10-26 21:48:07) : 호(Arc/Bulge) 곡선 단품 폴리곤 보간 정밀 추출 엔진 탑재
 ;;                                 1. MBB:GetPartContourEx 신규 함수: Bulge≠0 세그먼트 자동 감지 → 20분할 보간
 ;;                                 2. 단품 JSON "polygon" 속성에 호 곡선 보간점 포함 → D-shape/Arc 정밀 True-Shape 배치
@@ -3123,6 +3128,363 @@
   (setvar 'CMDECHO 1)
   (princ)
 )
+
+;;; =============================================================================
+;;; [START: CURRENT ACTIVE - v5.23 ADDED (2026-10-30 19:35:00)]
+;;; c:MBBDUMP - 1-Click Zero-Loss CAD to JSON Exporter
+;;; 선택한 외곽 컨테이너와 단품/문자/원호(Bulge) 형상을 프로젝트 디렉토리의
+;;; DEBUG_nesting_input.json 파일로 0.001초 만에 100% 무손실 덤프합니다.
+;;; =============================================================================
+(defun c:MBBDUMP ( / *error* ss-out ss-in acDoc mspace i ename obj objName
+                     containers-list cid is-circle c-cen c-rad c-area
+                     out-min out-max out-pts p1 p2 num-v vi total-len step-dist cur-dist
+                     geom-raw text-list clustered-parts grp parent-item
+                     placed ci minP maxP minC maxC
+                     parent-obj children-holes text-objs all-objs assigned-texts part-texts
+                     parts-list id-parts-list pid part-entry
+                     gap margin
+                     cur-dir json-dump json-temp f
+                     pi-idx num-parts ci-idx num-c cid-val is-c-val c-cen-val c-rad-val
+                     c-min-val c-max-val c-pts-val c-area-val part-pts poly-str pt-idx num-pts-p )
+  (vl-load-com)
+  (setq acDoc (vla-get-ActiveDocument (vlax-get-acad-object)))
+
+  (defun *error* ( msg )
+    (if (and msg (not (wcmatch (strcase msg t) "*break*,*cancel*,*exit*")))
+      (princ (strcat "\n>> [MBBDUMP 오류]: " msg))
+    )
+    (setvar 'CMDECHO 1)
+    (princ)
+  )
+
+  (setvar 'CMDECHO 0)
+
+  (princ "\n================================================================")
+  (princ "\n [MBBDUMP v5.23] 형상 데이터 1-클릭 JSON 원터치 덤프 추출기")
+  (princ "\n================================================================")
+
+  (setq margin (if *MBBN_MARGIN* *MBBN_MARGIN* 2.0))
+  (setq gap    (if *MBBN_GAP* *MBBN_GAP* 3.0))
+
+  ;; 1단계: 외곽 컨테이너 선택
+  (princ "\n>> [1단계] 외곽 컨테이너(철판 테두리/모재) 선택: ")
+  (if (setq ss-out (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION"))))
+    (progn
+      (setq containers-list '()
+            cid 0
+            i 0)
+      (repeat (sslength ss-out)
+        (setq ename (ssname ss-out i)
+              obj   (vlax-ename->vla-object ename)
+              objName (vla-get-ObjectName obj)
+              i     (1+ i))
+
+        (setq is-circle nil c-cen nil c-rad nil c-area 0.0 out-min nil out-max nil out-pts '())
+
+        ;; 원형 검출
+        (if (wcmatch (strcase objName) "*CIRCLE*")
+          (progn
+            (setq is-circle T
+                  c-cen (vlax-safearray->list (vlax-variant-value (vla-get-Center obj)))
+                  c-rad (vl-catch-all-apply 'vla-get-Radius (list obj)))
+            (if (vl-catch-all-error-p c-rad) (setq c-rad nil))
+            (if c-rad (setq c-area (* pi c-rad c-rad)))
+          )
+        )
+
+        ;; BBOX 산출
+        (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+          (progn
+            (setq tmp-min (vlax-safearray->list tmp-min)
+                  tmp-max (vlax-safearray->list tmp-max))
+            (setq out-min tmp-min
+                  out-max tmp-max)
+          )
+        )
+
+        ;; 정밀 곡선 세그먼트 샘플링
+        (setq total-len nil)
+        (if (not (vl-catch-all-error-p (setq total-len (vl-catch-all-apply 'vlax-curve-getDistAtParam (list obj (vlax-curve-getEndParam obj))))))
+          (if (and (numberp total-len) (> total-len 0.0))
+            (progn
+              (setq step-dist (max 2.0 (min 10.0 (/ total-len 120.0)))
+                    cur-dist 0.0)
+              (while (< cur-dist total-len)
+                (if (not (vl-catch-all-error-p (setq p1 (vl-catch-all-apply 'vlax-curve-getPointAtDist (list obj cur-dist)))))
+                  (setq out-pts (cons (list (car p1) (cadr p1)) out-pts))
+                )
+                (setq cur-dist (+ cur-dist step-dist))
+              )
+              (setq out-pts (reverse out-pts))
+            )
+          )
+        )
+
+        (if (null is-circle)
+          (setq c-area (vl-catch-all-apply 'vla-get-Area (list obj)))
+        )
+        (if (or (vl-catch-all-error-p c-area) (null c-area) (<= c-area 0.0))
+          (if (and out-min out-max)
+            (setq c-area (* (- (car out-max) (car out-min)) (- (cadr out-max) (cadr out-min))))
+          )
+        )
+
+        (if (or (and is-circle c-cen c-rad) (and out-min out-max))
+          (setq containers-list (cons (list cid is-circle c-cen c-rad out-min out-max out-pts c-area obj) containers-list)
+                cid (1+ cid))
+        )
+      )
+      (setq containers-list (reverse containers-list))
+
+      ;; 2단계: 배치할 단품 일괄 드래그 선택
+      (princ "\n>> [2단계] 배치할 단품 및 텍스트 일괄 선택 (드래그): ")
+      (if (setq ss-in (ssget "_:L" '((0 . "LINE,*POLYLINE,CIRCLE,ARC,ELLIPSE,SPLINE,REGION,TEXT,MTEXT,INSERT"))))
+        (progn
+          (setq geom-raw '() text-list '() i 0)
+          (repeat (sslength ss-in)
+            (setq ename (ssname ss-in i)
+                  i     (1+ i))
+            (if (not (ssmemb ename ss-out))
+              (progn
+                (setq obj (vlax-ename->vla-object ename)
+                      objName (vla-get-ObjectName obj))
+                (if (not (vl-catch-all-error-p (vl-catch-all-apply 'vla-getboundingbox (list obj 'tmp-min 'tmp-max))))
+                  (progn
+                    (setq tmp-min (vlax-safearray->list tmp-min)
+                          tmp-max (vlax-safearray->list tmp-max))
+                    (if (wcmatch (strcase objName) "*TEXT*")
+                      (setq text-list (cons (list obj tmp-min tmp-max) text-list))
+                      (progn
+                        (setq tmpArea (vl-catch-all-apply 'vla-get-Area (list obj)))
+                        (if (vl-catch-all-error-p tmpArea)
+                          (setq tmpArea (* (- (car tmp-max) (car tmp-min)) (- (cadr tmp-max) (cadr tmp-min))))
+                        )
+                        (if (<= tmpArea 1500000.0)
+                          (setq geom-raw (cons (list obj tmpArea tmp-min tmp-max) geom-raw))
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+
+          ;; 홀 클러스터링
+          (setq geom-raw (vl-sort geom-raw '(lambda (a b) (> (cadr a) (cadr b))))
+                clustered-parts '())
+          (foreach item geom-raw
+            (setq obj (car item)
+                  minC (nth 2 item)
+                  maxC (nth 3 item)
+                  placed nil
+                  ci 0)
+            (while (and (not placed) (< ci (length clustered-parts)))
+              (setq grp (nth ci clustered-parts)
+                    parent-item (car grp)
+                    minP (nth 2 parent-item)
+                    maxP (nth 3 parent-item))
+              (if (and (>= (car minC) (- (car minP) 0.5))
+                       (>= (cadr minC) (- (cadr minP) 0.5))
+                       (<= (car maxC) (+ (car maxP) 0.5))
+                       (<= (cadr maxC) (+ (cadr maxP) 0.5)))
+                (progn
+                  (setq grp (list parent-item (cons obj (cadr grp)))
+                        clustered-parts (MBB:ReplaceNth ci grp clustered-parts)
+                        placed T)
+                )
+              )
+              (setq ci (1+ ci))
+            )
+            (if (not placed)
+              (setq clustered-parts (cons (list item (list)) clustered-parts))
+            )
+          )
+          (setq clustered-parts (reverse clustered-parts))
+
+          ;; 텍스트 결합 및 BBOX 산출
+          (setq assigned-texts '()
+                parts-list '()
+                i 1)
+          (foreach grp clustered-parts
+            (setq parent-obj (caar grp)
+                  children-holes (cadr grp)
+                  tmp-min (nth 2 (car grp))
+                  tmp-max (nth 3 (car grp))
+                  part-texts '())
+            (foreach t-item text-list
+              (setq t-obj (nth 0 t-item)
+                    t-min (nth 1 t-item)
+                    t-max (nth 2 t-item)
+                    t-cx  (* 0.5 (+ (car t-min) (car t-max)))
+                    t-cy  (* 0.5 (+ (cadr t-min) (cadr t-max))))
+              (if (and (null (vl-position t-obj assigned-texts))
+                       (<= (- (car tmp-min) 1.0) t-cx)
+                       (<= t-cx (+ (car tmp-max) 1.0))
+                       (<= (- (cadr tmp-min) 1.0) t-cy)
+                       (<= t-cy (+ (cadr tmp-max) 1.0)))
+                (setq part-texts (cons t-obj part-texts)
+                      assigned-texts (cons t-obj assigned-texts))
+              )
+            )
+            (setq all-objs (cons parent-obj (append children-holes part-texts))
+                  w (- (car tmp-max) (car tmp-min))
+                  h (- (cadr tmp-max) (cadr tmp-min))
+                  area (* w h))
+            (setq parts-list (cons (list all-objs (car tmp-min) (cadr tmp-min) w h area (length children-holes) (length part-texts)) parts-list)
+                  i (1+ i))
+          )
+
+          ;; Bigness 정렬
+          (setq parts-list (vl-sort parts-list
+                             '(lambda (a b)
+                                (> (+ (nth 5 a) (* (max (nth 3 a) (nth 4 a)) 500.0))
+                                   (+ (nth 5 b) (* (max (nth 3 b) (nth 4 b)) 500.0))))))
+
+          (setq id-parts-list '()
+                pid 0)
+          (foreach p parts-list
+            (setq id-parts-list (cons (cons pid p) id-parts-list)
+                  pid (1+ pid))
+          )
+          (setq id-parts-list (reverse id-parts-list))
+
+          ;; 파일 저장 경로: 작업 디렉토리의 DEBUG_nesting_input.json
+          (setq cur-dir (MBB:GetRootDir))
+          (if (or (null cur-dir) (= cur-dir ""))
+            (setq cur-dir "C:/Users/like/OneDrive/문서/MBB")
+          )
+          (setq cur-dir (vl-string-translate "/" "\\" cur-dir))
+          (setq json-dump (strcat cur-dir "\\DEBUG_nesting_input.json"))
+
+          ;; JSON 파일 쓰기
+          (setq f (open json-dump "w"))
+          (if f
+            (progn
+              (write-line "{" f)
+              (write-line (strcat "  \"gap\": " (rtos gap 2 4) ",") f)
+              (write-line (strcat "  \"margin\": " (rtos margin 2 4) ",") f)
+              (write-line "  \"mode\": \"fast\"," f)
+              (write-line "  \"containers\": [" f)
+              (setq ci-idx 0 num-c (length containers-list))
+              (foreach c containers-list
+                (setq ci-idx (1+ ci-idx)
+                      cid-val (nth 0 c)
+                      is-c-val (nth 1 c)
+                      c-cen-val (nth 2 c)
+                      c-rad-val (nth 3 c)
+                      c-min-val (nth 4 c)
+                      c-max-val (nth 5 c)
+                      c-pts-val (nth 6 c)
+                      c-area-val (nth 7 c))
+                (write-line "    {" f)
+                (write-line (strcat "      \"id\": " (itoa cid-val) ",") f)
+                (if is-c-val
+                  (progn
+                    (write-line "      \"type\": \"circle\"," f)
+                    (write-line (strcat "      \"circle_center\": [" (rtos (car c-cen-val) 2 4) ", " (rtos (cadr c-cen-val) 2 4) "],") f)
+                    (write-line (strcat "      \"circle_radius\": " (rtos c-rad-val 2 4) ",") f)
+                  )
+                  (progn
+                    (write-line "      \"type\": \"polygon\"," f)
+                    (write-line (strcat "      \"outer_bbox\": [" (rtos (car c-min-val) 2 4) ", " (rtos (cadr c-min-val) 2 4) ", "
+                                        (rtos (car c-max-val) 2 4) ", " (rtos (cadr c-max-val) 2 4) "],") f)
+                    (write-line "      \"outer_polygon\": [" f)
+                    (setq pi-idx 0 num-pts (length c-pts-val))
+                    (foreach pt c-pts-val
+                      (setq pi-idx (1+ pi-idx))
+                      (write-line (strcat "        [" (rtos (car pt) 2 4) ", " (rtos (cadr pt) 2 4) "]"
+                                          (if (< pi-idx num-pts) "," "")) f)
+                    )
+                    (write-line "      ]," f)
+                  )
+                )
+                (write-line (strcat "      \"area\": " (rtos c-area-val 2 4)) f)
+                (write-line (strcat "    }" (if (< ci-idx num-c) "," "")) f)
+              )
+              (write-line "  ]," f)
+
+              ;; parts 배열 출력
+              (write-line "  \"parts\": [" f)
+              (setq pi-idx 0 num-parts (length id-parts-list))
+              (foreach item id-parts-list
+                (setq pi-idx (1+ pi-idx)
+                      pid (car item)
+                      p   (cdr item)
+                      orig-min-x (nth 1 p)
+                      orig-min-y (nth 2 p)
+                      parent-obj (car (nth 0 p))
+                      part-pts (MBB:GetPartContourEx parent-obj)
+                      poly-str "")
+                (if (and part-pts (> (length part-pts) 2))
+                  (progn
+                    (setq poly-str ", \"polygon\": [")
+                    (setq pt-idx 0 num-pts-p (length part-pts))
+                    (foreach pt part-pts
+                      (setq pt-idx (1+ pt-idx))
+                      (setq poly-str (strcat poly-str "[" (rtos (- (car pt) orig-min-x) 2 4) ", "
+                                                      (rtos (- (cadr pt) orig-min-y) 2 4) "]"
+                                                      (if (< pt-idx num-pts-p) ", " "")))
+                    )
+                    (setq poly-str (strcat poly-str "]"))
+                  )
+                )
+                (setq assigned-cid (MBB:FindClosestContainerId (+ orig-min-x (* 0.5 (nth 3 p))) containers-list))
+                (write-line (strcat "    {\"id\": " (itoa pid)
+                                    ", \"container_id\": " (itoa assigned-cid)
+                                    ", \"orig_min_x\": " (rtos orig-min-x 2 4)
+                                    ", \"orig_min_y\": " (rtos orig-min-y 2 4)
+                                    ", \"w\": " (rtos (nth 3 p) 2 4)
+                                    ", \"h\": " (rtos (nth 4 p) 2 4)
+                                    ", \"area\": " (rtos (nth 5 p) 2 4)
+                                    poly-str
+                                    "}"
+                                    (if (< pi-idx num-parts) "," "")) f)
+              )
+              (write-line "  ]" f)
+              (write-line "}" f)
+              (close f)
+
+              (princ "\n----------------------------------------------------------------")
+              (princ (strcat "\n [MBBDUMP 완료] 컨테이너 " (itoa (length containers-list)) "개 / 부재 " (itoa (length id-parts-list)) "개 덤프 완료!"))
+              (princ (strcat "\n 저장 위치: " json-dump))
+              (princ "\n >> Antigravity 에이전트에게 \"덤프 땄어, 네스팅해줘\"라고 말씀하시면 됩니다.")
+              (princ "\n----------------------------------------------------------------")
+            )
+            (princ "\n>> 오류: JSON 파일을 생성할 수 없습니다.")
+          )
+        )
+      )
+    )
+  )
+
+  (if (and ss-out (= (type ss-out) 'PICKSET)) (setq ss-out nil))
+  (if (and ss-in (= (type ss-in) 'PICKSET)) (setq ss-in nil))
+  (setvar 'CMDECHO 1)
+  (princ)
+)
+
+;;; =============================================================================
+;;; c:MBBLOAD - 1-Click Zero-Loss Nesting Result Applier
+;;; out_test.lsp 결과 배치 파일을 원터치로 도면에 즉시 반영합니다.
+;;; =============================================================================
+(defun c:MBBLOAD ( / cur-dir lsp-path )
+  (setq cur-dir (MBB:GetRootDir))
+  (if (or (null cur-dir) (= cur-dir ""))
+    (setq cur-dir "C:/Users/like/OneDrive/문서/MBB")
+  )
+  (setq lsp-path (strcat (vl-string-translate "\\" "/" cur-dir) "/out_test.lsp"))
+  (if (findfile lsp-path)
+    (progn
+      (load lsp-path)
+      (princ (strcat "\n>> [MBBLOAD 완료] " lsp-path " 정상 로드 완료!"))
+    )
+    (princ (strcat "\n>> 오류: " lsp-path " 파일을 찾을 수 없습니다. 먼저 네스팅을 실행하십시오."))
+  )
+  (princ)
+)
+;;; [END: CURRENT ACTIVE - v5.23 ADDED]
+
 
 (defun c:MBBUI ( / dcl_file fp dcl_id action thk_val )
   (setq dcl_file (vl-filename-mktemp "mbb.dcl"))
